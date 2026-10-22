@@ -72,6 +72,7 @@ enum {
     OP_NEG, OP_NOT, OP_INC, OP_DEC,
     OP_JEQ, OP_JEQI, OP_JNE, OP_JNEI,
     OP_JLT, OP_JLTI, OP_JGE, OP_JGEI,
+    OP_JLO, OP_JLOI, OP_JHS, OP_JHSI,   /* unsigned pairs (below / higher-same) */
     OP_JMP, OP_CALL, OP_RET,
     OP_PUSH, OP_PUSHI, OP_POP,
     OP_COUNT

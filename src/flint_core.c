@@ -268,23 +268,29 @@ int flint_step(flint_vm *vm)
 
     /* fused branches: absolute target */
     case OP_JEQ: case OP_JNE: case OP_JLT: case OP_JGE:
+    case OP_JLO: case OP_JHS:
         if (!rd_u8(vm, &pc, &ra) || !chk_reg(vm, ra) ||
             !rd_u8(vm, &pc, &rb) || !chk_reg(vm, rb) ||
             !rd_i64(vm, &pc, &target)) break;
         a = vm->r[ra]; off = vm->r[rb];
         if (target < 0 || target > vm->code_size) { vm->err = FLINT_ERR_BADPC; break; }
         if ((op == OP_JEQ && a == off) || (op == OP_JNE && a != off) ||
-            (op == OP_JLT && a <  off) || (op == OP_JGE && a >= off))
+            (op == OP_JLT && a <  off) || (op == OP_JGE && a >= off) ||
+            (op == OP_JLO && (uint64_t)a <  (uint64_t)off) ||
+            (op == OP_JHS && (uint64_t)a >= (uint64_t)off))
             pc = (uint32_t)target;
         break;
 
     case OP_JEQI: case OP_JNEI: case OP_JLTI: case OP_JGEI:
+    case OP_JLOI: case OP_JHSI:
         if (!rd_u8(vm, &pc, &ra) || !chk_reg(vm, ra) ||
             !rd_i64(vm, &pc, &off) || !rd_i64(vm, &pc, &target)) break;
         a = vm->r[ra];
         if (target < 0 || target > vm->code_size) { vm->err = FLINT_ERR_BADPC; break; }
         if ((op == OP_JEQI && a == off) || (op == OP_JNEI && a != off) ||
-            (op == OP_JLTI && a <  off) || (op == OP_JGEI && a >= off))
+            (op == OP_JLTI && a <  off) || (op == OP_JGEI && a >= off) ||
+            (op == OP_JLOI && (uint64_t)a <  (uint64_t)off) ||
+            (op == OP_JHSI && (uint64_t)a >= (uint64_t)off))
             pc = (uint32_t)target;
         break;
 

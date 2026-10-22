@@ -45,15 +45,16 @@ at exit time**: in the CLI that is the process exit code (truncated to the low
 ## CLI
 
 ```
-flint new <dir>          scaffold a project: Flint.toml + src/main.flint
-flint run <file.flint>   run a single file
+flint new <dir>          scaffold a project: Flint.toml + src/main.flt
+flint run <file.flt>     run a single file
 flint run [dir]          run a project (default: current directory)
-flint check <file.flint> assemble without executing (syntax gate)
+flint check <file.flt>   assemble without executing (syntax gate)
 flint check [dir]        check a project
+flint dis <file.flt>     assemble and print bytecode disassembly
 flint --version
 ```
 
-Shortcut: `flint path/file.flint` ≡ `flint run path/file.flint`.
+Shortcut: `flint path/file.flt` ≡ `flint run path/file.flt`.
 
 CLI exit codes:
 
@@ -67,6 +68,19 @@ CLI exit codes:
 
 `check` prints `flint: <file>: ok, <N> code bytes` on success.
 
+`dis` assembles and prints the bytecode back as text — sugar resolves into
+its emitted form (expert names, absolute targets), so a branch can 
+be seen exactly as the interpreter will run it:
+
+```
+$ flint dis demo/src/main.flt
+; 63 code bytes, entry 0x0000
+0x0000  set   r2, 0
+0x000A  load.byte r1, [r2+0]
+0x0015  jeqi r1, 0, 0x0037
+...
+```
+
 ---
 
 ## Project (Flint.toml)
@@ -76,13 +90,13 @@ CLI exit codes:
 ```
 demo/
 ├── Flint.toml
-└── src/main.flint
+└── src/main.flt
 ```
 
 ```toml
 [project]
 name = "demo"
-entry = "src/main.flint"
+entry = "src/main.flt"
 stack = 65536
 ```
 
@@ -92,7 +106,7 @@ string values are quoted. Keys:
 | Key    | Default          | Meaning                                  |
 |--------|------------------|------------------------------------------|
 | `name` | directory name   | plain project name                        |
-| `entry`| `src/main.flint` | path to the main program (relative to project root) |
+| `entry`| `src/main.flt` | path to the main program (relative to project root) |
 | `stack`| `65536`          | extra memory bytes reserved for the stack |
 
 Run from inside a project directory: `flint run` (no arguments).
@@ -223,7 +237,13 @@ jump.eq rs, rt\|imm, target      // if rs == rt|imm → pc = target
 jump.ne  ...                     // rs != rt
 jump.lt  ...                     // rs <  rt    (signed)
 jump.ge  ...                     // rs >= rt   (signed)
+jump.lo  ...                     // rs <u rt|imm (unsigned below)
+jump.hs  ...                     // rs >=u rt|imm (unsigned higher-or-same)
 ```
+
+Signed pairs follow int64 ordering; `lo`/`hs` reinterpret both sides as
+uint64 — the honest form for comparing memory addresses (a signed branch
+would lie for spans above 2^63).
 
 Short form — compare against zero (the common case):
 
@@ -236,6 +256,10 @@ jump.eq r1, done                 // JEQI r1, 0, done
 | `jump.xx rs, rt, target`  | 11    |
 | `jump.xx rs, imm, target` | 18    |
 | `jump.xx rs, target`      | 18    (sugar for `rs ?= 0`) |
+
+`xx` ∈ {eq, ne, lt, ge, lo, hs}. The sugar is a compare-against-zero —
+meaningful for `eq`/`ne`; `lo r, x` as `lo r, 0, x` is unsigned-impossible
+and never branches.
 
 Unconditional jump and procedures:
 
@@ -368,12 +392,12 @@ assembly) is one TU each; build with `-I include`.
 ## Examples
 
 ```
-tests/hello.flint   Hello, FLINT!                       (byte-wise string printing)
-tests/sum.flint     55                                  (sum 1..10)
-tests/fact.flint    720                                 (recursion: fact(6))
-tests/off.flint     119                                 (store/load with an offset)
-tests/fio.flint     42                                  (file write→read round-trip)
-tests/regs.flint    r0 = 7 … r7 = 0                     (register dump)
+tests/hello.flt   Hello, FLINT!                       (byte-wise string printing)
+tests/sum.flt     55                                  (sum 1..10)
+tests/fact.flt    720                                 (recursion: fact(6))
+tests/off.flt     119                                 (store/load with an offset)
+tests/fio.flt     42                                  (file write→read round-trip)
+tests/regs.flt    r0 = 7 … r7 = 0                     (register dump)
 ```
 
-Run one: `flint run tests/sum.flint` — or all of them: `make test`.
+Run one: `flint run tests/sum.flt` — or all of them: `make test`.

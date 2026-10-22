@@ -170,6 +170,22 @@ static const char *S_sugar =
 "    sys 0\n"
 "    exit\n";
 
+static const char *S_unsig =
+"code:\n"
+"main:\n"
+"    set r1, -1\n"
+"    set r0, 42\n"
+"    jump.lo r1, 1, wrong      // unsigned 0xFFFF..FF < 1: no\n"
+"    jump.hs r1, 1, ok         // unsigned >= 1: yes\n"
+"wrong:\n"
+"    set r0, 99\n"
+"    sys 0\n"
+"    exit\n"
+"ok:\n"
+"    sys 0\n"
+"    set r0, 0\n"
+"    exit\n";
+
 static const char *S_pushi =
 "code:\n"
 "main:\n"
@@ -273,6 +289,14 @@ int main(void)
     if (run_p(S_sugar,  "sugar"))   chk_out("0",    "branch two-operand sugar");
     if (run_p(S_pushi,  "pushi"))   chk_out("42",   "push imm / pop / add");
     if (run_p(S_dataref,"dataref")) chk_out("42",   "set label + load word");
+    if (run_p(S_unsig,  "unsig")) {
+        chk_out("42", "unsigned pair lo/hs");
+        /* lo must not fire: the "99" marker must never reach stdout */
+        if (outn == 2 && out[0] == '4' && out[1] == '2')
+            printf("PASS  wrong-branch path silent\n");
+        else { printf("FAIL  wrong-branch path leaked out=[%.*s]\n",
+                      (int)(outn > 60 ? 60 : outn), out); fails++; }
+    }
 
     chk_reject(S_bad_mnem,  "unknown mnemonic rejected");
     chk_reject(S_bad_label, "undefined label rejected");

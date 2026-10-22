@@ -273,7 +273,7 @@ static int proj_load(const char *root, flint_proj *pr, char *err, size_t ecap)
 
     pr->stack = 65536;
     pr->name[0] = 0;
-    snprintf(pr->entry, sizeof pr->entry, "src/main.flint");
+    snprintf(pr->entry, sizeof pr->entry, "src/main.flt");
 
     char *cur = src;
     while (*cur != 0) {
@@ -328,7 +328,7 @@ static int open_project(const char *root, char *entry, size_t cap,
 static int has_flint_ext(const char *s)
 {
     size_t n = strlen(s);
-    return n >= 6 && strcmp(s + (n - 6), ".flint") == 0;
+    return n >= 4 && strcmp(s + (n - 4), ".flt") == 0;
 }
 
 int has_flint_ext_public(const char *s)
@@ -364,6 +364,32 @@ int flint_cli_cmd_check(const char *arg)
         return 2;
     }
     return flint_cli_check_file(entry);
+}
+
+int flint_cli_cmd_dis(const char *arg)
+{
+    if (arg == 0 || !has_flint_ext(arg)) {
+        fprintf(stderr, "flint dis: <file.flt> required\n");
+        return 2;
+    }
+
+    long len;
+    char *src = read_whole(arg, &len);
+    if (!src) {
+        fprintf(stderr, "flint: %s: %s\n", arg, strerror(errno));
+        return 2;
+    }
+    flint_prog p; char err[384] = "";
+    if (flint_assemble(src, &p, 4096, err, sizeof(err)) != 0) {
+        fprintf(stderr, "flint: %s: %s\n", arg, err);
+        free(src);
+        return 1;
+    }
+    free(src);
+    printf("; %u code bytes, entry 0x%04X\n", p.code_size, p.entry);
+    int rc = flint_dis(p.code, p.code_size);
+    flint_prog_free(&p);
+    return rc;
 }
 
 /* ---------------- `flint new` ---------------- */
@@ -428,13 +454,13 @@ int flint_cli_cmd_new(const char *dirarg)
     fprintf(f,
         "[project]\n"
         "name = \"%s\"\n"
-        "entry = \"src/main.flint\"\n"
+        "entry = \"src/main.flt\"\n"
         "stack = 65536\n",
         name);
     fclose(f);
 
     char entry[600];
-    snprintf(entry, sizeof entry, "%.400s/src/main.flint", dir);
+    snprintf(entry, sizeof entry, "%.400s/src/main.flt", dir);
     f = fopen(entry, "w");
     if (!f) {
         fprintf(stderr, "flint: cannot write %s: %s\n", entry, strerror(errno));

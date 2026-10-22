@@ -15,7 +15,11 @@ int flint_cli_check_file(const char *path);
 
 /* command verbs: arg may be NULL (cwd project) */
 int flint_cli_cmd_new(const char *dir);
-int flint_cli_cmd_run(const char *arg);   /* .flint file or project dir */
+int flint_cli_cmd_run(const char *arg);   /* .flt file or project dir */
 int flint_cli_cmd_check(const char *arg);
+int flint_cli_cmd_dis(const char *arg);
+
+/* disassembler (flint_dis.c): decode code image to stdout, 0 on ok */
+int flint_dis(const flint_byte *code, uint32_t n);
 
 #endif /* FLINT_CLI_H */

@@ -402,6 +402,8 @@ static const mnem_t g_tab[] = {
     {"jump.ne",    N_BRANCH, OP_JNE, OP_JNEI},
     {"jump.lt",    N_BRANCH, OP_JLT, OP_JLTI},
     {"jump.ge",    N_BRANCH, OP_JGE, OP_JGEI},
+    {"jump.lo",    N_BRANCH, OP_JLO, OP_JLOI},
+    {"jump.hs",    N_BRANCH, OP_JHS, OP_JHSI},
     {"call",       N_CALL,  0, 0},
     {"return",     N_RET,   0, 0},
     {"push",       N_PUSH,  0, 0},

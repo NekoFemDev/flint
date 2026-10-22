@@ -201,6 +201,32 @@ static void t_badreg(void)
     CHECK(vm.err == FLINT_ERR_BADREG, "register 9 traps");
 }
 
+static void t_unsigned(void)
+{
+    /* -1 (0xFFFF..FFFF) vs 1: signed <, unsigned >.
+       JLO vs r2=1 must not branch (else marker sets r0=99); JHS must branch over. */
+    flint_vm vm; uint32_t f_lo, f_hs, hlt;
+    static flint_byte mem[512];
+
+    hasm_reset();
+    e_set(1, -1);
+    e_set(2, 1);
+    e_set(0, 42);
+    e8(OP_JLO); e8(1); e8(1); e64(0); tf(&f_lo);  /* r1 lo r1? imm-form avoided: rb=1 */
+    e8(OP_JHS); e8(1); e8(1); e64(0); tf(&f_hs);  /* r1 hs r1? */
+    e_set(0, 99);                       /* trap marker */
+    hlt = cn; e_hlt();
+
+    patch(f_lo, hlt - 10);              /* lo takes -> marker sets r0 = 99 */
+    patch(f_hs, hlt);                   /* hs takes  -> skips the marker */
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_OK && vm.r[0] == 42,
+          "unsigned pair: lo(-1,1) false, hs(-1,1) true");
+}
+
 int main(void)
 {
     printf("flint core %s\n", FLINT_VERSION);
@@ -211,6 +237,7 @@ int main(void)
     t_badmem();
     t_stack();
     t_badreg();
+    t_unsigned();
     printf("fails: %d\n", fails);
     return fails ? 1 : 0;
 }

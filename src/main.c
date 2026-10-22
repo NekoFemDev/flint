@@ -1,10 +1,11 @@
 /*
  * main.c — flint CLI entry.
- *   flint new <dir>          scaffold a project
- *   flint run <file.flint>   run a program file
- *   flint run [dir]          run a project (default: cwd)
- *   flint check <file.flint> assemble without running
- *   flint check [dir]        check a project (default: cwd)
+ *   flint new <dir>        scaffold a project
+ *   flint run <file.flt>   run a program file
+ *   flint run [dir]        run a project (default: cwd)
+ *   flint check <file.flt> assemble without running
+ *   flint check [dir]      check a project (default: cwd)
+ *   flint dis <file.flt>   assemble and print bytecode disassembly
  */
 #include <stdio.h>
 #include <string.h>
@@ -17,11 +18,12 @@ static void usage(FILE *o)
         "flint %s — minimal assembly language VM\n"
         "\n"
         "usage:\n"
-        "  flint new <dir>          scaffold a project\n"
-        "  flint run <file.flint>   run a program file\n"
-        "  flint run [dir]          run a project (default: cwd)\n"
-        "  flint check <file.flint> assemble without running\n"
-        "  flint check [dir]        check a project (default: cwd)\n"
+        "  flint new <dir>        scaffold a project\n"
+        "  flint run <file.flt>   run a program file\n"
+        "  flint run [dir]        run a project (default: cwd)\n"
+        "  flint check <file.flt> assemble without running\n"
+        "  flint check [dir]      check a project (default: cwd)\n"
+        "  flint dis <file.flt>   assemble and print bytecode disassembly\n"
         "  flint --version\n"
         "\n"
         "exit code: r0 at HLT (or negative error code on trap)\n",
@@ -55,6 +57,8 @@ int main(int argc, char **argv)
         return flint_cli_cmd_run(argc >= 3 ? argv[2] : 0);
     if (strcmp(cmd, "check") == 0)
         return flint_cli_cmd_check(argc >= 3 ? argv[2] : 0);
+    if (strcmp(cmd, "dis") == 0)
+        return flint_cli_cmd_dis(argc >= 3 ? argv[2] : 0);
 
     /* convenience: `flint path/file.flint` == `flint run path/file.flint` */
     if (has_flint_ext_public(cmd))
