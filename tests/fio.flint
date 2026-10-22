@@ -1,0 +1,57 @@
+// file I/O round-trip: write "ping\0", close, re-read, verify + EOF + first byte
+// run from the project root (build/ must exist)
+data:
+path: str "build/fio.bin", 0
+msg:  str "ping", 0
+buf:  bytes 8
+
+code:
+main:
+    set r1, 1              // mode 1 = write/truncate
+    set r2, path
+    sys 4                  // fopen; r0 = handle (or -1)
+    copy r4, r0
+    jump.lt r4, 0, fail
+
+    copy r1, r4            // handle
+    set r2, msg
+    set r3, 5              // "ping" + NUL
+    sys 7                  // fwrite -> bytes written
+    jump.ne r0, 5, fail
+
+    copy r1, r4
+    sys 5                  // fclose -> 0
+    jump.ne r0, 0, fail
+
+    set r1, 0              // mode 0 = read
+    set r2, path
+    sys 4
+    copy r4, r0
+    jump.lt r4, 0, fail
+
+    copy r1, r4
+    set r2, buf
+    set r3, 8              // ask for 8, file has 5
+    sys 6                  // fread -> 5
+    copy r5, r0
+    jump.ne r5, 5, fail
+
+    copy r1, r4
+    sys 6                  // again -> EOF, 0
+    jump.ne r0, 0, fail
+
+    copy r1, r4
+    sys 5
+    jump.ne r0, 0, fail
+
+    set r1, buf
+    load.byte r0, [r1]     // first byte 'p'
+    jump.ne r0, 112, fail  // 'p' = 112
+
+    set r0, 42
+    sys 0                  // emit the marker on stdout
+    set r0, 0              // clean exit code
+    exit
+fail:
+    set r0, 254
+    exit

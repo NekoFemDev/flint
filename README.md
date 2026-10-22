@@ -262,14 +262,25 @@ the factorial example (depth × 16 bytes per frame) runs as-is.
 
 ## Syscalls (included CLI host)
 
-| Slot | Name  | Input             | Result                          |
-|------|-------|-------------------|---------------------------------|
-| 0    | print | r0 = number       | print r0 as text + newline      |
-| 1    | putc  | r0 = character    | print the low byte              |
-| 2    | getc  | —                 | r0 = character or −1 (EOF)      |
+Convention: arguments pass in `r1..r3`; `r0` is always the result slot (an
+argument in `r0` is consumed before the result lands there). Memory arguments
+point into the flat `mem` image — the host validates every span against
+image bounds. Tables: handles are 1-based (0 is not a handle).
 
-A host application is free to define any other slots (3..63).
-Calling an unfilled slot is a predictable `NOSYS` trap.
+| Slot | Name   | Args (r1..r3) | Result                         |
+|------|--------|---------------|--------------------------------|
+| 0    | print  | r0 = number   | print r0 as text + newline     |
+| 1    | putc   | r0 = character | print the low byte            |
+| 2    | getc   | —             | r0 = character or −1 (EOF)     |
+| 3    | regs   | —             | print r0..r7, one per line     |
+| 4    | fopen  | r1 = mode (0 read / 1 write / 2 append), r2 = NUL-terminated path in `mem` | r0 = handle or −1 |
+| 5    | fclose | r1 = handle   | r0 = 0 or −1                   |
+| 6    | fread  | r1 = handle, r2 = buffer in `mem`, r3 = max bytes | r0 = bytes read, 0 on EOF, −1 on error |
+| 7    | fwrite | r1 = handle, r2 = buffer in `mem`, r3 = bytes | r0 = bytes written or −1 |
+| 8    | time   | —             | r0 = UNIX epoch seconds        |
+
+Slots 9..63 stay free for embedding hosts to define. Calling an unfilled
+slot is a predictable `NOSYS` trap.
 
 Common recipes:
 
@@ -277,6 +288,8 @@ Common recipes:
 sys 0           // print the result/counter              (r0 carries it)
 sys 1           // byte-by-byte printing of a data string
 sys 2           // manual stdin reading, one character at a time
+sys 3           // debug: dump registers mid-run
+sys 4/6/7       // file round-trip: fopen(path) -> fread/fwrite(buf, n) -> fclose
 ```
 
 ---
@@ -359,6 +372,8 @@ tests/hello.flint   Hello, FLINT!                       (byte-wise string printi
 tests/sum.flint     55                                  (sum 1..10)
 tests/fact.flint    720                                 (recursion: fact(6))
 tests/off.flint     119                                 (store/load with an offset)
+tests/fio.flint     42                                  (file write→read round-trip)
+tests/regs.flint    r0 = 7 … r7 = 0                     (register dump)
 ```
 
 Run one: `flint run tests/sum.flint` — or all of them: `make test`.

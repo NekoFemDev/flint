@@ -27,8 +27,11 @@ test: $(TESTS) $(BIN)
 	@./$(BIN) tests/hello.flint | grep -q "Hello, FLINT!"   \
 	  && ./$(BIN) tests/sum.flint  | grep -q 55             \
 	  && ./$(BIN) tests/fact.flint | grep -q 720            \
-	  && ./$(BIN) tests/off.flint  | grep -q 119
-	@echo "examples: 4/4 programs run"
+	  && ./$(BIN) tests/off.flint  | grep -q 119            \
+	  && ./$(BIN) tests/fio.flint  | grep -q 42             \
+	  && ./$(BIN) tests/regs.flint | grep -q "r0 = 7"        \
+	  && ./$(BIN) tests/regs.flint | grep -q "r7 = 0"
+	@echo "examples: 6/6 programs run"
 
 build:
 	mkdir -p build
