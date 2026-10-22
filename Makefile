@@ -1,0 +1,39 @@
+# flint — build script (cargo-style targets, zero dependencies)
+CC      ?= cc
+CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -I include
+SRC       = src/flint_core.c src/flint_asm.c src/flint_cli.c
+TESTSRC   = src/flint_core.c src/flint_asm.c
+
+BIN       = build/flint
+TESTS     = build/test_core build/test_asm
+TESTFILES = tests/hello.flint tests/sum.flint tests/fact.flint tests/off.flint
+
+all: $(BIN)
+
+.GROUPED: 
+
+$(BIN): $(SRC) include/flint.h include/flint_cli.h
+	$(CC) $(CFLAGS) $(SRC) src/main.c -o $@
+
+build/test_core: tests/test_core.c src/flint_core.c include/flint.h | build
+	$(CC) $(CFLAGS) $(TESTSRC) tests/test_core.c -o $@
+
+build/test_asm: tests/test_asm.c src/flint_core.c src/flint_asm.c include/flint.h | build
+	$(CC) $(CFLAGS) $(TESTSRC) tests/test_asm.c -o $@
+
+test: $(TESTS) $(BIN)
+	./build/test_core
+	./build/test_asm
+	@./$(BIN) tests/hello.flint | grep -q "Hello, FLINT!"   \
+	  && ./$(BIN) tests/sum.flint  | grep -q 55             \
+	  && ./$(BIN) tests/fact.flint | grep -q 720            \
+	  && ./$(BIN) tests/off.flint  | grep -q 119
+	@echo "examples: 4/4 programs run"
+
+build:
+	mkdir -p build
+
+clean:
+	rm -rf build
+
+.PHONY: all test clean

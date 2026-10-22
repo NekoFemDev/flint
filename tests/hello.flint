@@ -1,0 +1,17 @@
+data:
+hello: str "Hello, FLINT!", 10, 0
+
+code:
+main:
+    // print the string one byte at a time
+    set r2, hello
+loop:
+    load.byte r1, [r2]
+    jump.eq r1, 0, done      // trailing NUL?
+    copy r0, r1
+    sys 1                    // SYS 1 = putc(r0)
+    inc r2
+    jump loop
+done:
+    set r0, 0                // clean exit code
+    exit

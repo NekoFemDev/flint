@@ -1,0 +1,21 @@
+code:
+main:
+    set r0, 6
+    call fact
+    copy r0, r1
+    sys 0                     // 720
+    exit
+
+fact:
+    push r0
+    jump.ge r0, 2, rec
+    pop r0
+    set r1, 1
+    return
+rec:
+    dec r0
+    call fact                 // r1 = (n-1)!
+    inc r0
+    mul r1, r1, r0
+    pop r0
+    return

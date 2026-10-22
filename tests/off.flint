@@ -1,0 +1,16 @@
+data:
+answer: int 42
+buf:    bytes 16
+
+code:
+main:
+    // store/load through an offset
+    set r3, buf
+    set r0, 77
+    store [r3+4], r0         // buf+4 = 77
+    set r1, answer
+    load r2, [r1]            // r2 = 42
+    load r4, [r3+4]          // r4 = 77
+    add r0, r2, r4           // 42 + 77 = 119
+    sys 0
+    exit

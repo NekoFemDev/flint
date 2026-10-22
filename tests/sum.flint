@@ -1,0 +1,13 @@
+code:
+main:
+    // sum 1..10 = 55
+    set r0, 0                // acc
+    set r1, 1                // i
+loop:
+    jump.ge r1, 11, done
+    add r0, r0, r1
+    inc r1
+    jump loop
+done:
+    sys 0                    // SYS 0 = print number
+    exit
