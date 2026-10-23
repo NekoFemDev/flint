@@ -1,3 +1,5 @@
+include "stdlib.flt"
+
 code:
 main:
     // sum 1..10 = 55
@@ -9,5 +11,8 @@ loop:
     inc r1
     jump loop
 done:
-    sys 0                    // SYS 0 = print number
+    copy r1, r0              // s_num argument
+    call s_num               // prints "55" via sys 0 (span print)
+    set r0, 10               // '\n'
+    sys 1
     exit

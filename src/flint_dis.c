@@ -17,19 +17,22 @@
 #include <string.h>
 #include "flint.h"
 
+/* assembler-surface names: immediate forms share the base mnemonic
+ * (OP_ADDI prints as "add rd, ra, imm"), OP_HLT prints as "exit" */
 static const char *names[OP_COUNT] = {
-    "int",  "hlt",
+    "sys",  "exit",
     "set",  "copy",
-    "loadb",  "loadw",  "storeb",  "storew",
-    "add",  "addi", "sub",  "subi", "mul",  "muli",
-    "div",  "divi", "mod",  "modi",
-    "and",  "andi", "or",   "ori",  "xor",  "xori",
-    "shl",  "shli", "shr",  "shri",
+    "load.byte",  "load",  "store.byte",  "store",
+    "add",  "add", "sub",  "sub", "mul",  "mul",
+    "div",  "div", "mod",  "mod",
+    "and",  "and", "or",   "or",  "xor",  "xor",
+    "shl",  "shl", "shr",  "shr",
     "neg",  "not",  "inc",  "dec",
-    "jeq",  "jeqi", "jne",  "jnei", "jlt",  "jlti", "jge", "jgei",
-    "jlo",  "jloi", "jhs",  "jhsi",
-    "jmp",  "call", "ret",
-    "push", "pushi", "pop"
+    "jump.eq",  "jump.eq", "jump.ne",  "jump.ne",
+    "jump.lt",  "jump.lt", "jump.ge",  "jump.ge",
+    "jump.lo",  "jump.lo", "jump.hs",  "jump.hs",
+    "jump",  "call", "return",
+    "push", "push", "pop"
 };
 
 static int op_len(flint_byte op)
@@ -94,31 +97,28 @@ int flint_dis(const flint_byte *code, uint32_t n)
             fprintf(stderr, "dis: truncated tail at 0x%04X (needs %d)\n", at, len);
             return 1;
         }
-        if (pc > 0xFFFF) break;    /* images beyond 64K print with wide offsets */
 
         P("0x%04X  ", at);
         switch (op) {
-        case OP_INT:   P("int   %u", (unsigned)code[pc]); pc += 1; break;
-        case OP_HLT:   P("hlt");           break;
-        case OP_RET:   P("ret");           break;
+        case OP_INT:   P("%s %u", names[op], (unsigned)code[pc]); pc += 1; break;
+        case OP_HLT:   P("%s", names[op]); break;
+        case OP_RET:   P("%s", names[op]); break;
         case OP_SET:
             rd = code[pc++];
             rd_i64(code, &pc, &imm, n);
-            P("set   r%d, %lld", rd, (long long)imm); break;
+            P("%s r%d, %lld", names[op], rd, (long long)imm); break;
         case OP_COPY:
             rd = code[pc++]; ra = code[pc++];
-            P("copy  r%d, r%d", rd, ra); break;
+            P("%s r%d, r%d", names[op], rd, ra); break;
         case OP_LOADB: case OP_LOADW:
             rd = code[pc++]; rb = code[pc++];
             rd_i64(code, &pc, &imm, n);
-            P("%s r%d, [r%d%lld]", op == OP_LOADB ? "load.byte" : "load ",
-              rd, rb, (long long)imm);
+            P("%s r%d, [r%d%+lld]", names[op], rd, rb, (long long)imm);
             break;
         case OP_STOREB: case OP_STOREW:
             rb = code[pc++]; rd = code[pc++];
             rd_i64(code, &pc, &imm, n);
-            P("%s [r%d%lld], r%d", op == OP_STOREB ? "store.byte" : "store",
-              rb, (long long)imm, rd);
+            P("%s [r%d%+lld], r%d", names[op], rb, (long long)imm, rd);
             break;
         case OP_NEG: case OP_NOT:
             rd = code[pc++]; ra = code[pc++];
@@ -155,12 +155,12 @@ int flint_dis(const flint_byte *code, uint32_t n)
             rd_i64(code, &pc, &tgt, n);
             P("%s 0x%04X", names[op], (unsigned)tgt); break;
         case OP_PUSH:
-            ra = code[pc++]; P("push  r%d", ra); break;
+            ra = code[pc++]; P("%s r%d", names[op], ra); break;
         case OP_PUSHI:
             rd_i64(code, &pc, &imm, n);
-            P("pushi %lld", (long long)imm); break;
+            P("%s %lld", names[op], (long long)imm); break;
         case OP_POP:
-            rd = code[pc++]; P("pop   r%d", rd); break;
+            rd = code[pc++]; P("%s r%d", names[op], rd); break;
         default:
             fprintf(stderr, "dis: unhandled opcode %u\n", (unsigned)op);
             return 1;

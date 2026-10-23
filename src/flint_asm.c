@@ -19,6 +19,7 @@
  *   data       str "bytes", chars, nums | int num | bytes num
  *   sections   code: / data:  (code is the default)
  *   labels     name:  |  .local:   (locals attach to last global)
+ *   includes   include "file"  |  .include "file"   (same directive)
  *   comments   // to end of line
  */
 #include <stdlib.h>
@@ -58,6 +59,33 @@ static void bb_patch(bbuf *x, uint32_t at, flint_word v)
         x->b[at + i] = (flint_byte)(((uint64_t)v >> (8 * i)) & 0xFF);
 }
 
+/* ---- file frame management (include) ---- */
+
+static char *dupstr(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *d = (char *)malloc(n);
+    if (d) memcpy(d, s, n);
+    return d;
+}
+
+/* "a/b/c.flt" -> "a/b"  (or "."); also accepts '\\' separators */
+static char *dir_of(const char *path)
+{
+    const char *sl = strrchr(path, '/');
+#ifdef _WIN32
+    const char *bs = strrchr(path, '\\');
+    if (bs && (!sl || bs > sl)) sl = bs;
+#endif
+    size_t n = sl ? (size_t)(sl - path) : 0;
+    if (n == 0 && sl) n = 1;                    /* "/x.flt" -> "/" */
+    char *d = (char *)malloc(n ? n + 1 : 2);
+    if (!d) return dupstr(".");
+    if (n == 0) { d[0] = '.'; d[1] = 0; return d; }
+    memcpy(d, path, n); d[n] = 0;
+    return d;
+}
+
 /* ---- symbols ---- */
 
 enum { S_CODE = 0, S_DATA };
@@ -65,16 +93,46 @@ enum { F_ANY = 0, F_CODE };
 
 typedef struct { char name[T_MAX]; flint_word addr; int kind; } symbol;
 
+/* ---- lexer ---- */
+
+enum { T_IDENT, T_NUM, T_STR, T_CHR, T_PUNCT, T_EOL, T_EOF };
+
+typedef struct {
+    int type;
+    int len;                    /* T_STR payload length; may embed NULs */
+    flint_word num;
+    char s[T_MAX];
+} token;
+
 typedef struct {
     uint32_t at;                /* byte offset of the i64 field  */
     char     name[T_MAX];       /* referenced label              */
+    char     file[T_MAX];       /* source file the fixup text lives in */
     int      want;              /* F_CODE: label must be code    */
     int      buf;               /* 0 = code image, 1 = data image */
     uint32_t line;
 } fixup;
 
+/* include machinery: a stack of saved parent lexer states */
+#define FLINX_MAX_INC 24
+
+typedef struct {
+    const char *saved_src; uint32_t saved_ipos, saved_line;
+    char *saved_name, *saved_dir;     /* strdup'd, owned by the assembler */
+    int    saved_owned;               /* saved text: freed by the owner chain */
+    int    saved_have; token saved_tok;
+    int    saved_section;             /* section + last_global are per-file */
+    char   saved_last_global[T_MAX];
+} incframe;
+
 typedef struct {
     const char *src; uint32_t ipos, line;
+
+    char *cur_name, *cur_dir;         /* strdup'd file name + directory */
+    int    cur_owned;                 /* root text is not ours; includes are */
+    incframe fr[FLINX_MAX_INC]; int fsp;
+
+    flint_include_fn inc_fn; void *inc_ud;
 
     bbuf     code, mem;
     symbol  *syms; uint32_t ns, cs;
@@ -83,20 +141,34 @@ typedef struct {
     char     last_global[T_MAX];
     int      section;
     char     err[384];
+
+    /* lookahead — struct fields, must survive frame swaps */
+    token ahead_v; int have_v;
 } asmx;
 
-/* ---- lexer ---- */
-
-enum { T_IDENT, T_NUM, T_STR, T_CHR, T_PUNCT, T_EOL, T_EOF };
-
-typedef struct { int type; flint_word num; char s[T_MAX]; } token;
+static void fail_common(asmx *a, const char *file, uint32_t line,
+                        const char *fmt, va_list ap)
+{
+    char buf[300];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    snprintf(a->err, sizeof(a->err), "%s:%u: %s", file ? file : "<src>", line, buf);
+}
 
 static void fail(asmx *a, const char *fmt, ...)
 {
     va_list ap;
     if (a->err[0]) return;                      /* first error wins */
     va_start(ap, fmt);
-    vsnprintf(a->err, sizeof(a->err), fmt, ap);
+    fail_common(a, a->cur_name, a->line, fmt, ap);
+    va_end(ap);
+}
+
+static void fail_at(asmx *a, const char *file, uint32_t line, const char *fmt, ...)
+{
+    va_list ap;
+    if (a->err[0]) return;
+    va_start(ap, fmt);
+    fail_common(a, file, line, fmt, ap);
     va_end(ap);
 }
 
@@ -117,8 +189,8 @@ static int esc(int c)
 
 static void next_tok(asmx *a, token *t)
 {
-    t->s[0] = 0; t->num = 0;
-    t->type = T_EOL;                            /* unused len field */
+    t->s[0] = 0; t->num = 0; t->len = 0;
+    t->type = T_EOL;
 
     for (;;) {
         if (a->src[a->ipos] == 0) { t->type = T_EOF; return; }
@@ -143,43 +215,47 @@ static void next_tok(asmx *a, token *t)
         a->ipos++;
         while (a->src[a->ipos] && a->src[a->ipos] != '"') {
             char c = a->src[a->ipos];
-            if (n >= T_MAX - 1) { fail(a, "line %u: string too long", a->line); return; }
+            if (n >= T_MAX - 1) { fail(a, "string too long"); return; }
             if (c == '\\' && a->src[a->ipos + 1]) {
                 int e = esc(a->src[a->ipos + 1]);
-                if (e < 0) { fail(a, "line %u: bad escape \\%c", a->line, a->src[a->ipos + 1]); return; }
+                if (e < 0) { fail(a, "bad escape \\%c", a->src[a->ipos + 1]); return; }
                 t->s[n++] = (char)e; a->ipos += 2;
             } else { t->s[n++] = c; a->ipos++; }
         }
-        if (a->src[a->ipos] != '"') { fail(a, "line %u: unterminated string", a->line); return; }
+        if (a->src[a->ipos] != '"') { fail(a, "unterminated string"); return; }
         a->ipos++;
-        t->s[n] = 0; t->type = T_STR; return;
+        t->s[n] = 0; t->len = n; t->type = T_STR; return;
     }
     if (a->src[a->ipos] == '\'') {
         int v;
         a->ipos++;
         if (a->src[a->ipos] == '\\') {
             v = esc(a->src[a->ipos + 1]);
-            if (v < 0 || !a->src[a->ipos + 1]) { fail(a, "line %u: bad char literal", a->line); return; }
+            if (v < 0 || !a->src[a->ipos + 1]) { fail(a, "bad char literal"); return; }
             a->ipos += 2;
         } else {
-            if (!a->src[a->ipos]) { fail(a, "line %u: bad char literal", a->line); return; }
+            if (!a->src[a->ipos]) { fail(a, "bad char literal"); return; }
             v = (unsigned char)a->src[a->ipos]; a->ipos++;
         }
-        if (a->src[a->ipos] != '\'') { fail(a, "line %u: expected closing quote", a->line); return; }
+        if (a->src[a->ipos] != '\'') { fail(a, "expected closing quote"); return; }
         a->ipos++;
         t->num = v; t->type = T_CHR; return;
     }
     if (is_dig(a->src[a->ipos])) {
         uint64_t v = 0;
-        if (a->src[a->ipos] == '0' && a->src[a->ipos + 1] == 'x') {
+        if (a->src[a->ipos] == '0' &&
+            (a->src[a->ipos + 1] == 'x' || a->src[a->ipos + 1] == 'X')) {
+            int ndig = 0;
             a->ipos += 2;
             for (;;) {
                 int c = a->src[a->ipos], d;
                 if (is_dig(c)) d = c - '0';
                 else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
                 else break;
-                v = v * 16 + (uint64_t)d; a->ipos++;
+                v = v * 16 + (uint64_t)d; a->ipos++; ndig++;
             }
+            if (ndig == 0) { fail(a, "empty 0x literal"); t->type = T_EOF; return; }
         } else {
             while (is_dig(a->src[a->ipos])) {
                 v = v * 10 + (uint64_t)(a->src[a->ipos] - '0'); a->ipos++;
@@ -192,27 +268,25 @@ static void next_tok(asmx *a, token *t)
         t->type = T_PUNCT; t->s[0] = a->src[a->ipos]; t->s[1] = 0;
         a->ipos++; return;
     default:
-        fail(a, "line %u: stray character '%c'", a->line, a->src[a->ipos]);
+        fail(a, "stray character '%c'", a->src[a->ipos]);
         a->ipos++; t->type = T_EOF; return;
     }
 }
 
-/* lookahead machinery */
-
-static token ahead_tok; static int have_ahead;
+/* lookahead machinery — per-asmx, survives include frame swaps */
 
 static void pk(asmx *a, token *t)
 {
-    if (!have_ahead) {
-        next_tok(a, &ahead_tok);
-        have_ahead = 1;
+    if (!a->have_v) {
+        next_tok(a, &a->ahead_v);
+        a->have_v = 1;
     }
-    *t = ahead_tok;
+    *t = a->ahead_v;
 }
 
 static void nx(asmx *a, token *t)
 {
-    if (have_ahead) { *t = ahead_tok; have_ahead = 0; }
+    if (a->have_v) { *t = a->ahead_v; a->have_v = 0; }
     else next_tok(a, t);
 }
 
@@ -223,7 +297,7 @@ static int sym_add(asmx *a, const char *name, flint_word addr, int kind)
     uint32_t i;
     for (i = 0; i < a->ns; i++)
         if (strcmp(a->syms[i].name, name) == 0) {
-            fail(a, "line %u: duplicate label \"%s\"", a->line, name);
+            fail(a, "duplicate label \"%s\"", name);
             return -1;
         }
     if (a->ns + 1 > a->cs) {
@@ -262,6 +336,7 @@ static int fx_add(asmx *a, uint32_t at, const char *name, int want, int buf)
     }
     a->fix[a->nf].at = at;
     snprintf(a->fix[a->nf].name, T_MAX, "%s", name);
+    snprintf(a->fix[a->nf].file, T_MAX, "%s", a->cur_name ? a->cur_name : "<src>");
     a->fix[a->nf].want = want;
     a->fix[a->nf].buf  = buf;
     a->fix[a->nf].line = a->line;
@@ -291,7 +366,7 @@ static int reg_no(const token *t)
 static int parse_reg(asmx *a, int *r, token *t)
 {
     pk(a, t);
-    if (reg_no(t) < 0) { fail(a, "line %u: expected register r0..r7", a->line); return 0; }
+    if (reg_no(t) < 0) { fail(a, "expected register r0..r7"); return 0; }
     nx(a, t);
     *r = t->s[1] - '0';
     return 1;
@@ -303,7 +378,7 @@ static int parse_imm(asmx *a, opr *o, token *t)
     if (t->type == T_PUNCT && t->s[0] == '-') {
         nx(a, t);
         pk(a, t);
-        if (t->type != T_NUM) { fail(a, "line %u: expected number after '-'", a->line); return 0; }
+        if (t->type != T_NUM) { fail(a, "expected number after '-'"); return 0; }
         nx(a, t);
         o->kind = O_NUM; o->num = -t->num; return 1;
     }
@@ -319,7 +394,7 @@ static int parse_imm(asmx *a, opr *o, token *t)
         snprintf(o->name, sizeof(o->name), "%s", full);
         return 1;
     }
-    fail(a, "line %u: expected immediate or label", a->line);
+    fail(a, "expected immediate or label");
     return 0;
 }
 
@@ -327,7 +402,7 @@ static int parse_mem(asmx *a, opr *o, token *t)
 {
     int rb;
     pk(a, t);
-    if (t->type != T_PUNCT || t->s[0] != '[') { fail(a, "line %u: expected '['", a->line); return 0; }
+    if (t->type != T_PUNCT || t->s[0] != '[') { fail(a, "expected '['"); return 0; }
     nx(a, t);
     if (!parse_reg(a, &rb, t)) return 0;
     o->reg = (uint8_t)rb;
@@ -337,12 +412,12 @@ static int parse_mem(asmx *a, opr *o, token *t)
         int neg = (t->s[0] == '-');
         nx(a, t);
         pk(a, t);
-        if (t->type != T_NUM) { fail(a, "line %u: expected offset number", a->line); return 0; }
+        if (t->type != T_NUM) { fail(a, "expected offset number"); return 0; }
         nx(a, t);
         o->num = neg ? -t->num : t->num;
     }
     pk(a, t);
-    if (t->type != T_PUNCT || t->s[0] != ']') { fail(a, "line %u: expected ']'", a->line); return 0; }
+    if (t->type != T_PUNCT || t->s[0] != ']') { fail(a, "expected ']'"); return 0; }
     nx(a, t);
     return 1;
 }
@@ -430,7 +505,7 @@ static int need_comma(asmx *a, token *t)
     if (t->type == T_PUNCT && t->s[0] == ',') { nx(a, t); return 1; }
     if (t->type == T_IDENT || t->type == T_NUM || t->type == T_CHR ||
         (t->type == T_PUNCT && t->s[0] == '[')) {
-        fail(a, "line %u: expected ','", a->line); return 0;
+        fail(a, "expected ','"); return 0;
     }
     return 1;    /* EOL — nothing more on this line */
 }
@@ -490,7 +565,7 @@ static void m_arith(asmx *a, int rop, int iop)
         if (!parse_reg(a, &ra, &t)) return;
         pk(a, &t);
         if (t.type == T_EOL || t.type == T_EOF) {
-            fail(a, "line %u: expected third operand", a->line);
+            fail(a, "expected third operand");
             return;
         }
         if (!need_comma(a, &t)) return;
@@ -535,7 +610,7 @@ static void m_jump(asmx *a)
         opr o; if (!parse_imm(a, &o, &t)) return;
         e_cst(a, OP_JMP); e_field(a, &o, F_CODE);
     } else {
-        fail(a, "line %u: expected label after jump", a->line);
+        fail(a, "expected label after jump");
     }
 }
 
@@ -551,10 +626,10 @@ static void m_branch(asmx *a, int bop, int bopi)
 
     if (reg_no(&t) >= 0) {                       /* rs vs rt|imm */
         if (!parse_reg(a, &rt, &t)) return;
-        if (!need_comma(a, &t)) { fail(a, "line %u: expected branch target", a->line); return; }
+        if (!need_comma(a, &t)) { fail(a, "expected branch target"); return; }
         pk(a, &t);
         if (t.type == T_EOL || t.type == T_EOF) {
-            fail(a, "line %u: expected branch target", a->line); return;
+            fail(a, "expected branch target"); return;
         }
         if (!parse_imm(a, &tgt, &t)) return;
         e_cst(a, bop); e_regb(a, rs); e_regb(a, rt);
@@ -574,7 +649,7 @@ static void m_branch(asmx *a, int bop, int bopi)
     if (!need_comma(a, &t)) return;
     pk(a, &t);
     if (t.type == T_EOL || t.type == T_EOF) {
-        fail(a, "line %u: expected branch target", a->line); return;
+        fail(a, "expected branch target"); return;
     }
     if (!parse_imm(a, &tgt, &t)) return;
     e_cst(a, bopi); e_regb(a, rs);
@@ -590,7 +665,7 @@ static void m_call(asmx *a)
         opr o; if (!parse_imm(a, &o, &t)) return;
         e_cst(a, OP_CALL); e_field(a, &o, F_CODE);
     } else {
-        fail(a, "line %u: expected label after call", a->line);
+        fail(a, "expected label after call");
     }
 }
 
@@ -618,9 +693,9 @@ static void m_sys(asmx *a)
 {
     token t;
     pk(a, &t);
-    if (t.type != T_NUM) { fail(a, "line %u: expected syscall number", a->line); return; }
+    if (t.type != T_NUM) { fail(a, "expected syscall number"); return; }
     nx(a, &t);
-    if (t.num < 0 || t.num > 255) { fail(a, "line %u: syscall number out of range", a->line); return; }
+    if (t.num < 0 || t.num > 255) { fail(a, "syscall number out of range"); return; }
     e_cst(a, OP_INT); e_cst(a, (int)t.num);
 }
 
@@ -637,15 +712,18 @@ static void d_str(asmx *a)
     if (t.type == T_STR) {
         int i;
         nx(a, &t);
-        for (i = 0; t.s[i]; i++) { if (!bb_put(&a->mem, (int)(unsigned char)t.s[i])) fail(a, "out of memory"); }
+        /* walk len, not NUL: \0 bytes inside the literal reach the image */
+        for (i = 0; i < t.len; i++) {
+            if (!bb_put(&a->mem, (int)(unsigned char)t.s[i])) fail(a, "out of memory");
+        }
     } else if (t.type == T_NUM || t.type == T_CHR) {
         opr o;
         nx(a, &t);
         o.kind = O_NUM; o.num = t.num;
-        if (o.num < 0 || o.num > 255) { fail(a, "line %u: str byte out of range", a->line); return; }
+        if (o.num < 0 || o.num > 255) { fail(a, "str byte out of range"); return; }
         if (!bb_put(&a->mem, (int)o.num)) fail(a, "out of memory");
     } else {
-        fail(a, "line %u: expected string literal", a->line);
+        fail(a, "expected string literal");
         return;
     }
     for (;;) {                                   /* ", byte" tail */
@@ -653,8 +731,8 @@ static void d_str(asmx *a)
         if (t.type == T_PUNCT && t.s[0] == ',') {
             nx(a, &t);
             pk(a, &t);
-            if (t.type != T_NUM && t.type != T_CHR) { fail(a, "line %u: expected byte value", a->line); return; }
-            if (t.num < 0 || t.num > 255) { fail(a, "line %u: str byte out of range", a->line); return; }
+            if (t.type != T_NUM && t.type != T_CHR) { fail(a, "expected byte value"); return; }
+            if (t.num < 0 || t.num > 255) { fail(a, "str byte out of range"); return; }
             nx(a, &t);
             if (!bb_put(&a->mem, (int)t.num)) fail(a, "out of memory");
             continue;
@@ -667,7 +745,7 @@ static void d_int(asmx *a)
 {
     token t;
     pk(a, &t);
-    if (t.type != T_NUM) { fail(a, "line %u: expected number", a->line); return; }
+    if (t.type != T_NUM) { fail(a, "expected number"); return; }
     nx(a, &t);
     bb_i64(&a->mem, t.num);
 }
@@ -677,7 +755,7 @@ static void d_bytes(asmx *a)
     token t;
     uint32_t n;
     pk(a, &t);
-    if (t.type != T_NUM) { fail(a, "line %u: expected size", a->line); return; }
+    if (t.type != T_NUM) { fail(a, "expected size"); return; }
     nx(a, &t);
     for (n = 0; n < (uint32_t)t.num; n++) { if (!bb_put(&a->mem, 0)) fail(a, "out of memory"); }
 }
@@ -694,6 +772,105 @@ static void asm_define_label(asmx *a, const token *tname)
     if (sym_add(a, full, pos, a->section) < 0) return;
     if (tname->s[0] != '.')
         snprintf(a->last_global, sizeof(a->last_global), "%s", tname->s);
+}
+
+/* ---- include ---- */
+
+static void pop_file(asmx *a)
+{
+    incframe *f = &a->fr[--a->fsp];
+    if (a->cur_owned) free((char *)a->src);
+    free(a->cur_name);
+    free(a->cur_dir);
+    a->src      = f->saved_src;
+    a->ipos     = f->saved_ipos;
+    a->line     = f->saved_line;
+    a->cur_name = f->saved_name;
+    a->cur_dir  = f->saved_dir;
+    a->cur_owned = f->saved_owned;
+    a->have_v   = f->saved_have;
+    a->ahead_v  = f->saved_tok;
+    a->section  = f->saved_section;
+    memcpy(a->last_global, f->saved_last_global, sizeof(a->last_global));
+}
+
+static void do_include(asmx *a)
+{
+    token t;
+    char path[T_MAX], ierr[256];
+
+    pk(a, &t);
+    if (t.type != T_STR) {
+        fail(a, "include takes a quoted path");
+        return;
+    }
+    if (strlen(t.s) != (size_t)t.len) {
+        fail(a, "include path contains NUL");
+        return;
+    }
+    snprintf(path, sizeof(path), "%s", t.s);
+    nx(a, &t);                                  /* consume the string       */
+    pk(a, &t);
+    if (t.type != T_EOL && t.type != T_EOF) {
+        fail(a, "unexpected text after include");
+        return;
+    }
+    nx(a, &t);                                  /* eat the EOL (if any)     */
+
+    if (!a->inc_fn) {
+        fail(a, "include unavailable: no resolver (plain flint_assemble?)");
+        return;
+    }
+    if (a->fsp >= FLINX_MAX_INC) {
+        fail(a, "include depth over %d", FLINX_MAX_INC);
+        return;
+    }
+
+    ierr[0] = 0;
+    char *text = a->inc_fn(a->inc_ud, path, a->cur_dir ? a->cur_dir : ".",
+                           ierr, (uint32_t)sizeof(ierr));
+    if (!text) {
+        fail(a, "include \"%s\": %s", path, ierr[0] ? ierr : "not found");
+        return;
+    }
+    if (!text[0]) {                             /* already included, skip   */
+        free(text);
+        return;
+    }
+    if (a->err[0]) { free(text); return; }      /* resolver failed mid-way?? */
+    if (!a->cur_name || !a->cur_dir) { free(text); fail(a, "out of memory"); return; }
+
+    incframe *f = &a->fr[a->fsp++];
+    f->saved_src   = a->src;
+    f->saved_ipos  = a->ipos;
+    f->saved_line  = a->line;
+    f->saved_name  = a->cur_name;
+    f->saved_dir   = a->cur_dir;
+    f->saved_owned = a->cur_owned;
+    f->saved_have  = a->have_v;
+    f->saved_tok   = a->ahead_v;
+    f->saved_section = a->section;
+    memcpy(f->saved_last_global, a->last_global, sizeof(f->saved_last_global));
+
+    a->src       = text;
+    a->ipos      = 0;
+    a->line      = 1;
+    a->cur_owned = 1;
+    a->have_v    = 0;
+    a->ahead_v.type = T_EOF; a->ahead_v.len = 0; a->ahead_v.s[0] = 0; a->ahead_v.num = 0;
+    a->cur_name  = dupstr(path);
+    a->cur_dir   = dir_of(path);
+    if (!a->cur_name || !a->cur_dir) {
+        free(a->cur_name); free(a->cur_dir);
+        a->cur_name = f->saved_name; a->cur_dir = f->saved_dir;   /* undo */
+        a->src = f->saved_src; a->ipos = f->saved_ipos; a->line = f->saved_line;
+        a->cur_owned = f->saved_owned; a->have_v = f->saved_have; a->ahead_v = f->saved_tok;
+        a->section = f->saved_section;
+        memcpy(a->last_global, f->saved_last_global, sizeof(a->last_global));
+        a->fsp--;
+        free(text);
+        fail(a, "out of memory");
+    }
 }
 
 static int asm_statement(asmx *a, const mnem_t *m, const char *nm)
@@ -724,7 +901,16 @@ static int asm_statement(asmx *a, const mnem_t *m, const char *nm)
     case D_STR:    d_str(a);      break;
     case D_INT:    d_int(a);      break;
     case D_BYTES:  d_bytes(a);    break;
-    default:       pk(a, &t); fail(a, "line %u: internal dispatch miss", a->line); break;
+    default:       pk(a, &t); fail(a, "internal dispatch miss"); break;
+    }
+
+    /* one statement per line: nothing may follow but EOL/EOF */
+    if (!a->err[0]) {
+        pk(a, &t);
+        if (t.type != T_EOL && t.type != T_EOF) {
+            fail(a, "unexpected text after statement");
+            return -1;
+        }
     }
     return 0;
 }
@@ -735,12 +921,18 @@ static int asm_scan(asmx *a)
 
     for (;;) {
         pk(a, &t);
-        if (t.type == T_EOF || a->err[0]) break;
+        if (t.type == T_EOF || a->err[0]) {
+            if (!a->err[0] && t.type == T_EOF && a->fsp > 0) {
+                pop_file(a);
+                continue;
+            }
+            break;
+        }
 
         if (t.type == T_EOL) { nx(a, &t); continue; }
 
         if (t.type != T_IDENT) {
-            fail(a, "line %u: expected mnemonic, label or section", a->line);
+            fail(a, "expected mnemonic, label or section");
             break;
         }
         nx(a, &t);                          /* ident consumed */
@@ -754,18 +946,22 @@ static int asm_scan(asmx *a)
             continue;
         }
 
+        if (strcmp(t.s, "include") == 0 || strcmp(t.s, ".include") == 0) {
+            do_include(a); continue;
+        }
+
         {
             const mnem_t *m = find_mnem(t.s);
-            if (!m) { fail(a, "line %u: unknown mnemonic \"%s\"", a->line, t.s); break; }
+            if (!m) { fail(a, "unknown mnemonic \"%s\"", t.s); break; }
             if (a->section == S_CODE && (m->cls == D_STR || m->cls == D_INT || m->cls == D_BYTES)) {
-                fail(a, "line %u: data directive \"%s\" in code section", a->line, t.s);
+                fail(a, "data directive \"%s\" in code section", t.s);
                 break;
             }
             if (a->section == S_DATA && m->cls != D_STR && m->cls != D_INT && m->cls != D_BYTES) {
-                fail(a, "line %u: instruction \"%s\" in data section", a->line, t.s);
+                fail(a, "instruction \"%s\" in data section", t.s);
                 break;
             }
-            asm_statement(a, m, t.s);
+            if (asm_statement(a, m, t.s) != 0) break;
         }
     }
     if (a->err[0]) return -1;
@@ -778,17 +974,228 @@ static int asm_resolve(asmx *a)
     for (i = 0; i < a->nf; i++) {
         int s = sym_find(a, a->fix[i].name);
         if (s < 0) {
-            fail(a, "line %u: undefined label \"%s\"", a->fix[i].line, a->fix[i].name);
+            fail_at(a, a->fix[i].file, a->fix[i].line, "undefined label \"%s\"",
+                    a->fix[i].name);
             return -1;
         }
         if (a->fix[i].want == F_CODE && a->syms[s].kind != S_CODE) {
-            fail(a, "line %u: \"%s\" is not a code label", a->fix[i].line, a->fix[i].name);
+            fail_at(a, a->fix[i].file, a->fix[i].line, "\"%s\" is not a code label",
+                    a->fix[i].name);
             return -1;
         }
         if (a->fix[i].buf == 0) bb_patch(&a->code, a->fix[i].at, a->syms[s].addr);
         else                    bb_patch(&a->mem,  a->fix[i].at, a->syms[s].addr);
     }
     return 0;
+}
+
+/* ---- standalone include preprocessor (host convenience) ----
+ *
+ * flint_pp_includes() textually expands
+ *     include "path"      .include "path"
+ * lines before assembly, resolving each path relative to the file that
+ * contains it (fopen). For hosts that do not register a resolver with
+ * flint_assemble_ctx — the CLI front-end uses the streaming resolver
+ * instead (per-file line numbers, include-once semantics).
+ * Cycles die on the depth cap.
+ */
+
+#define PP_DEFAULT_DEPTH 10
+
+typedef struct { char *s; uint32_t n, cap; int oom; } ppbuf;
+
+static int pp_put(ppbuf *b, const char *p, uint32_t n)
+{
+    if (b->oom) return 0;
+    if ((uint64_t)b->n + n + 1 > b->cap) {
+        uint32_t nc = b->cap ? b->cap : 1024;
+        char *ns;
+        while ((uint64_t)nc < (uint64_t)b->n + n + 1) {
+            if (nc > 0x40000000u) { b->oom = 1; return 0; }
+            nc *= 2;
+        }
+        ns = (char *)realloc(b->s, nc);
+        if (!ns) { b->oom = 1; return 0; }
+        b->s = ns; b->cap = nc;
+    }
+    if (n) memcpy(b->s + b->n, p, n);
+    b->n += n;
+    b->s[b->n] = 0;
+    return 1;
+}
+
+/* "dir" + "/" + "name"; absolute names pass through untouched */
+static char *pp_join(const char *dir, const char *name)
+{
+    size_t dl, nl;
+    char *p;
+    if (name[0] == '/' || name[0] == 0) return dupstr(name);
+#ifdef _WIN32
+    if (name[1] == ':') return dupstr(name);
+#endif
+    dl = strlen(dir);
+    nl = strlen(name);
+    p = (char *)malloc(dl + nl + 2);
+    if (!p) return 0;
+    memcpy(p, dir, dl);
+    p[dl] = '/';
+    memcpy(p + dl + 1, name, nl + 1);
+    return p;
+}
+
+/* slurp a file; *out_len optional */
+static char *pp_read_whole(const char *path, long *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    long len;
+    char *buf;
+
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    len = ftell(f);
+    if (len < 0) { fclose(f); return 0; }
+    rewind(f);
+    buf = (char *)malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return 0; }
+    if (len > 0 && fread(buf, 1, (size_t)len, f) != (size_t)len) {
+        fclose(f); free(buf); return 0;
+    }
+    buf[len] = 0;
+    fclose(f);
+    if (out_len) *out_len = len;
+    return buf;
+}
+
+/* classify one line (sans '\n'):
+ *   0 = plain text, 1 = include (path filled), -1 = malformed include */
+static int pp_line(const char *l, uint32_t len, char *path, uint32_t cap)
+{
+    uint32_t i = 0, j, k = 0;
+
+    while (i < len && (l[i] == ' ' || l[i] == '\t')) i++;
+    if      (i + 7 <= len && memcmp(l + i, "include", 7) == 0) j = i + 7;
+    else if (i + 8 <= len && memcmp(l + i, ".include", 8) == 0) j = i + 8;
+    else return 0;
+
+    /* word boundary: "includeX" is an ordinary token, not a directive */
+    if (j < len && l[j] != ' ' && l[j] != '\t' && l[j] != '"' && l[j] != '\r')
+        return 0;
+    while (j < len && (l[j] == ' ' || l[j] == '\t')) j++;
+    if (j >= len || l[j] != '"') return -1;          /* path missing */
+    j++;
+    while (j < len && l[j] != '"') {
+        if (k + 1 >= cap) return -1;                 /* path too long */
+        path[k++] = l[j++];
+    }
+    if (j >= len) return -1;                         /* unterminated  */
+    path[k] = 0;
+    j++;
+    while (j < len && (l[j] == ' ' || l[j] == '\t' || l[j] == '\r')) j++;
+    if (j + 1 < len && l[j] == '/' && l[j + 1] == '/') return 1;  /* comment */
+    return (j == len) ? 1 : -1;
+}
+
+/* splice text into out, recursing through includes */
+static int pp_expand(ppbuf *out, const char *text, const char *file,
+                     const char *dir, uint32_t depth, uint32_t max_depth,
+                     char *err, uint32_t errsz)
+{
+    uint32_t pos = 0, line = 0;
+
+    while (text[pos] != 0) {
+        uint32_t start = pos, end;
+        char path[1024];
+        int kind;
+
+        while (text[pos] != 0 && text[pos] != '\n') pos++;
+        end = pos;
+        line++;
+        kind = pp_line(text + start, end - start, path,
+                       (uint32_t)sizeof(path));
+
+        if (kind < 0) {
+            snprintf(err, errsz,
+                     "%s:%u: malformed include (want: include \"path\")",
+                     file ? file : "<src>", line);
+            return 0;
+        }
+        if (kind == 1) {                             /* splice the file in */
+            char *full, *fdir, *ftext;
+
+            if (depth + 1 > max_depth) {
+                snprintf(err, errsz,
+                         "%s:%u: include depth %u exceeded (circular include?)",
+                         file ? file : "<src>", line, max_depth);
+                return 0;
+            }
+            full = pp_join(dir, path);
+            if (!full) { snprintf(err, errsz, "out of memory"); return 0; }
+            ftext = pp_read_whole(full, 0);
+            if (!ftext) {
+                snprintf(err, errsz, "%s:%u: include \"%s\": cannot open",
+                         file ? file : "<src>", line, path);
+                free(full);
+                return 0;
+            }
+            fdir = dir_of(full);
+            if (!fdir) {
+                snprintf(err, errsz, "out of memory");
+                free(ftext); free(full);
+                return 0;
+            }
+            if (!pp_expand(out, ftext, full, fdir, depth + 1, max_depth,
+                           err, errsz)) {
+                free(ftext); free(fdir); free(full);
+                return 0;                            /* err already filled */
+            }
+            free(ftext); free(fdir); free(full);
+        } else {
+            if (!pp_put(out, text + start, end - start)) {
+                snprintf(err, errsz, "out of memory");
+                return 0;
+            }
+        }
+        if (text[pos] == '\n') {
+            if (!pp_put(out, "\n", 1)) {
+                snprintf(err, errsz, "out of memory");
+                return 0;
+            }
+            pos++;
+        }
+    }
+    return 1;
+}
+
+char *flint_pp_includes(const char *src, const char *src_name,
+                        uint32_t max_depth, char *err, uint32_t errsz)
+{
+    ppbuf out;
+    char scratch[256];
+    char *e = err ? err : scratch;
+    uint32_t es = err ? errsz : (uint32_t)sizeof(scratch);
+    char *dir;
+
+    e[0] = 0;
+    if (!src) return 0;
+    if (max_depth == 0) max_depth = PP_DEFAULT_DEPTH;
+
+    memset(&out, 0, sizeof(out));
+    dir = src_name ? dir_of(src_name) : dupstr(".");
+    if (!dir) { snprintf(e, es, "out of memory"); return 0; }
+
+    if (!pp_expand(&out, src, src_name ? src_name : "<src>", dir, 0,
+                   max_depth, e, es)) {
+        free(dir);
+        free(out.s);
+        return 0;
+    }
+    free(dir);
+    if (!out.s) {                                    /* empty expansion */
+        out.s = (char *)malloc(1);
+        if (!out.s) { snprintf(e, es, "out of memory"); return 0; }
+        out.s[0] = 0;
+    }
+    return out.s;
 }
 
 /* ---- public API ---- */
@@ -799,14 +1206,23 @@ static void flint_prog_free_tmp(asmx *a)
     free(a->syms); free(a->fix);
 }
 
-int flint_assemble(const char *src, flint_prog *out,
-                   uint32_t stack_extra, char *err, uint32_t err_size)
+int flint_assemble_ctx(const char *src, const char *src_name,
+                       flint_include_fn inc_fn, void *inc_ud,
+                       flint_prog *out,
+                       uint32_t stack_extra, char *err, uint32_t err_size)
 {
     asmx a;
     int i, e;
     memset(&a, 0, sizeof(a));
-    have_ahead = 0;
     a.src = src; a.ipos = 0; a.line = 1; a.section = S_CODE;
+    a.inc_fn = inc_fn; a.inc_ud = inc_ud;
+    a.cur_name = dupstr(src_name ? src_name : "<src>");
+    a.cur_dir  = src_name ? dir_of(src_name) : dupstr(".");
+    if (!a.cur_name || !a.cur_dir) {
+        if (err && err_size) snprintf(err, err_size, "out of memory");
+        free(a.cur_name); free(a.cur_dir);
+        return -1;
+    }
 
     e = asm_scan(&a);
     if (e == 0) e = asm_resolve(&a);
@@ -840,7 +1256,14 @@ int flint_assemble(const char *src, flint_prog *out,
     }
 
     flint_prog_free_tmp(&a);
+    free(a.cur_name); free(a.cur_dir);
     return e;
+}
+
+int flint_assemble(const char *src, flint_prog *out,
+                   uint32_t stack_extra, char *err, uint32_t err_size)
+{
+    return flint_assemble_ctx(src, 0, 0, 0, out, stack_extra, err, err_size);
 }
 
 void flint_prog_free(flint_prog *p)

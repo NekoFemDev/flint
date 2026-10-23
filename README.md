@@ -167,6 +167,22 @@ Directives inside `data:`:
 
 All three accept comma-separated lists: `str "ab", 13, 10, 0` and so on.
 
+### Includes
+
+`include "path"` (or `.include "path"`) splices another source file at the
+directive's position. The CLI host resolves the path relative to the
+including file, then the project root and `lib/`, and skips a real file
+that was already included once:
+
+```
+.include "stdlib.flt"
+```
+
+Embedding hosts decide where includes come from: `flint_assemble_ctx`
+takes a resolver callback per file, while `flint_pp_includes()` is a
+standalone textual preprocessor (fopen, depth-capped at 10) for hosts
+without a resolver.
+
 ### Memory operands
 
 ```
@@ -291,28 +307,30 @@ argument in `r0` is consumed before the result lands there). Memory arguments
 point into the flat `mem` image — the host validates every span against
 image bounds. Tables: handles are 1-based (0 is not a handle).
 
-| Slot | Name   | Args (r1..r3) | Result                         |
-|------|--------|---------------|--------------------------------|
-| 0    | print  | r0 = number   | print r0 as text + newline     |
-| 1    | putc   | r0 = character | print the low byte            |
-| 2    | getc   | —             | r0 = character or −1 (EOF)     |
-| 3    | regs   | —             | print r0..r7, one per line     |
-| 4    | fopen  | r1 = mode (0 read / 1 write / 2 append), r2 = NUL-terminated path in `mem` | r0 = handle or −1 |
-| 5    | fclose | r1 = handle   | r0 = 0 or −1                   |
-| 6    | fread  | r1 = handle, r2 = buffer in `mem`, r3 = max bytes | r0 = bytes read, 0 on EOF, −1 on error |
-| 7    | fwrite | r1 = handle, r2 = buffer in `mem`, r3 = bytes | r0 = bytes written or −1 |
-| 8    | time   | —             | r0 = UNIX epoch seconds        |
+| Slot | Name      | Args (r1..r3) | Result                         |
+|------|-----------|---------------|--------------------------------|
+| 0    | print_str | r1 = addr, r2 = len | writes r2 raw bytes (NULs included); clobbers no register |
+| 1    | putc      | r0 = character | print the low byte            |
+| 2    | getc      | —             | r0 = character or −1 (EOF)     |
+| 3    | read_mem  | —             | reserved (debug stub: r0 = −1) |
+| 4    | fopen     | r1 = mode (0 read / 1 write / 2 append), r2 = NUL-terminated path in `mem` | r0 = handle or −1 |
+| 5    | fclose    | r1 = handle   | r0 = 0 or −1                   |
+| 6    | fread     | r1 = handle, r2 = buffer in `mem`, r3 = max bytes | r0 = bytes read, 0 on EOF, −1 on error |
+| 7    | fwrite    | r1 = handle, r2 = buffer in `mem`, r3 = bytes | r0 = bytes written or −1 |
+| 8    | time      | —             | r0 = UNIX epoch seconds        |
+| 9    | regs      | —             | debug: print r0..r7, one per line (not part of the stable ABI) |
 
-Slots 9..63 stay free for embedding hosts to define. Calling an unfilled
-slot is a predictable `NOSYS` trap.
+Slots 0..3 are the standard set (`FLINT_SYS_*` in `flint.h`); 4..8 are the
+CLI extensions. Slots 10..63 stay free for embedding hosts. Calling an
+unfilled slot is a predictable `NOSYS` trap.
 
 Common recipes:
 
 ```
-sys 0           // print the result/counter              (r0 carries it)
-sys 1           // byte-by-byte printing of a data string
+sys 0           // print a memory span (r1 = addr, r2 = len) — stdlib s_print
+sys 1           // putc: low byte of r0
 sys 2           // manual stdin reading, one character at a time
-sys 3           // debug: dump registers mid-run
+sys 9           // debug: dump registers mid-run
 sys 4/6/7       // file round-trip: fopen(path) -> fread/fwrite(buf, n) -> fclose
 ```
 
@@ -398,6 +416,8 @@ tests/fact.flt    720                                 (recursion: fact(6))
 tests/off.flt     119                                 (store/load with an offset)
 tests/fio.flt     42                                  (file write→read round-trip)
 tests/regs.flt    r0 = 7 … r7 = 0                     (register dump)
+tests/libdemo.flt 63 / 9 / 11 / HELLO WORLD           (stdlib + string includes)
+tests/mem.flt     flint                               (s_memset/s_memcpy via .include)
 ```
 
 Run one: `flint run tests/sum.flt` — or all of them: `make test`.

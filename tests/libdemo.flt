@@ -1,0 +1,49 @@
+// libdemo — exercises lib/stdlib.flt and lib/string.flt through include.
+//
+// Expected output (one line per newline):
+//   63
+//   9
+//   11
+//   HELLO WORLD
+
+include "stdlib.flt"
+include "string.flt"
+
+data:
+msg: str "hello world", 0
+
+code:
+main:
+    // s_num prints a decimal value (arg r1) through sys 0
+    set r1, 63
+    call s_num                  // "63"
+    set r0, 10
+    sys 1                       // newline
+
+    // 63 = 9 * 7: div/mod maths exercised, then print the divisor
+    set r2, 9
+    set r1, 63
+    div r3, r1, r2              // r3 = 7
+    copy r1, r2
+    call s_num                  // "9"
+    set r0, 10
+    sys 1
+
+    // s_strlen("hello world") = 11
+    set r1, msg
+    call s_strlen
+    copy r1, r0
+    call s_num                  // "11"
+    set r0, 10
+    sys 1
+
+    // s_upper mutates in place, then s_print writes the span out
+    set r1, msg
+    call s_upper                // "HELLO WORLD"
+    copy r1, r0
+    call s_print
+    set r0, 10
+    sys 1
+
+    set r0, 0
+    exit

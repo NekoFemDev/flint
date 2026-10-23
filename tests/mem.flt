@@ -1,0 +1,29 @@
+// mem — exercises the .include alias, the sys 0 span print, and the
+// stdlib memory helpers: memset fills, memcpy copies, s_print emits.
+// run from the project root (lib/ resolves the include)
+.include "stdlib.flt"
+
+data:
+src: str "flint", 0
+dst: bytes 8
+
+code:
+main:
+    // dst[0..5) = 'A' x5
+    set r1, dst
+    set r2, 65                  // 'A'
+    set r3, 5
+    call s_memset
+
+    // dst[0..5) = "flint" (overwrites the fill; dst[5] stays NUL)
+    set r1, dst
+    set r2, src
+    set r3, 5
+    call s_memcpy
+
+    set r1, dst
+    call s_print                // "flint"
+    set r0, 10
+    sys 1
+    set r0, 0
+    exit

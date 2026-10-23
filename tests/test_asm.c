@@ -26,6 +26,7 @@ static void s_prn(flint_vm *vm)
 static void out_reset(void) { outn = 0; out[0] = 0; }
 
 static flint_vm last;
+static int g_rc;
 
 /* assemble + init + run; returns 1 on success, checks the vm */
 static int run_p(const char *src, const char *what)
@@ -40,7 +41,7 @@ static int run_p(const char *src, const char *what)
     flint_init(&last, p.code, p.code_size, p.mem, p.mem_size);
     flint_sys_set(&last, 0, s_prn);
     flint_sys_set(&last, 1, s_putc);
-    flint_run(&last, p.entry);
+    g_rc = (int)flint_run(&last, p.entry);
     flint_prog_free(&p);
     return 1;
 }
@@ -52,7 +53,8 @@ static void chk_out(const char *want, const char *what)
         memcmp(out, want, outn) == 0)
         printf("PASS  %s  [%s]\n", what, out);
     else {
-        printf("FAIL  %s  err=%d out=[%.*s]\n", what, last.err,
+        printf("FAIL  %s  err=%d%s out=[%.*s]\n", what, last.err,
+               last.err != FLINT_OK ? last.err_text : "",
                (int)(outn > 60 ? 60 : outn), out);
         fails++;
     }
@@ -69,6 +71,64 @@ static void chk_reject(const char *src, const char *what)
         return;
     }
     printf("PASS  %s  (%s)\n", what, err);
+}
+
+/* ---- include machinery: fake resolver over an in-memory table ---- */
+
+typedef struct { const char *name; const char *text; } inc_entry;
+
+
+static const inc_entry g_inc[] = {
+    { "part.flt",  "code:\ninc_helper:\n    set r1, 42\n    return\n" },
+    { "data.flt",  "data:\ninc_msg: str \"hi\", 0\ncode:\n" },
+    { "n1.flt",     "include \"n2.flt\"\ncode:\ninc_who:\n    copy r4, r5\n    return\n" },
+    { "n2.flt",     "code:\ninc_nested_helper:\n    set r1, 7\n    return\n" },
+    { "cyc_a.flt",  "include \"cyc_b.flt\"\ncode:\ninc_a:\n    return\n" },
+    { "cyc_b.flt",  "include \"cyc_a.flt\"\ncode:\ninc_b:\n    return\n" },
+    { 0, 0 }
+};
+
+static char g_seen[8][64]; static int g_nseen;
+
+static void inc_reset(void) { g_nseen = 0; }
+
+static char *inc_fake(void *ud, const char *name, const char *from_dir,
+                      char *err, uint32_t errsz)
+{
+    const inc_entry *e = g_inc;
+    size_t nl = strlen(name);
+    for (; e->name; e++)
+        if (strlen(e->name) == nl && strcmp(e->name, name) == 0) break;
+    if (!e->name) {
+        snprintf(err, errsz, "not found (from %s)", from_dir);
+        return 0;
+    }
+    for (int i = 0; i < g_nseen; i++)
+        if (strcmp(g_seen[i], name) == 0) { char *z = malloc(1); *z = 0; return z; }
+    if (g_nseen < 8) snprintf(g_seen[g_nseen++], 64, "%s", name);
+    (void)ud;
+    size_t n = strlen(e->text) + 1;
+    char *d = malloc(n); memcpy(d, e->text, n);
+    return d;
+}
+
+/* run_p_ctx: like run_p but through flint_assemble_ctx with the fake resolver */
+static int run_ctx(const char *src, const char *name, flint_include_fn fn,
+                   void *ud, const char *what)
+{
+    flint_prog p; char err[256] = "";
+    if (flint_assemble_ctx(src, name, fn, ud, &p, 4096, err, sizeof(err)) != 0) {
+        printf("FAIL  %s: assemble: %s\n", what, err[0] ? err : "?");
+        fails++;
+        return 0;
+    }
+    out_reset();
+    flint_init(&last, p.code, p.code_size, p.mem, p.mem_size);
+    flint_sys_set(&last, 0, s_prn);
+    flint_sys_set(&last, 1, s_putc);
+    g_rc = (int)flint_run(&last, p.entry);
+    flint_prog_free(&p);
+    return 1;
 }
 
 /* --- programs --- */
@@ -276,6 +336,45 @@ static void t_hello(void)
     flint_prog_free(&p);
 }
 
+/* ---- textual preprocessor (flint_pp_includes): real files in build/ ---- */
+
+static void t_pp(void)
+{
+    FILE *f;
+    char *out; char err[256] = "";
+
+    /* nested expansion + .include spelling, relative to the includer */
+    f = fopen("build/pp_b.flt", "wb");
+    if (f) { fputs("set r0, 7\n", f); fclose(f); }
+    f = fopen("build/pp_a.flt", "wb");
+    if (f) { fputs("include \"pp_b.flt\"\nset r1, 9\n", f); fclose(f); }
+
+    out = flint_pp_includes(".include \"build/pp_a.flt\"\n", "main.flt", 0,
+                            err, sizeof err);
+    if (out && strstr(out, "set r0, 7") && strstr(out, "set r1, 9") &&
+        strstr(out, "include") == 0)
+        printf("PASS  pp: nested textual include, directives gone\n");
+    else { printf("FAIL  pp: nested  [%s] err=%s\n",
+                  out ? out : "(null)", err); fails++; }
+    free(out);
+
+    /* cycle: ppc_a <-> ppc_b must die on the depth cap */
+    f = fopen("build/ppc_b.flt", "wb");
+    if (f) { fputs(".include \"ppc_a.flt\"\nset r2, 1\n", f); fclose(f); }
+    f = fopen("build/ppc_a.flt", "wb");
+    if (f) { fputs(".include \"ppc_b.flt\"\nset r3, 1\n", f); fclose(f); }
+    err[0] = 0;
+    out = flint_pp_includes(".include \"build/ppc_a.flt\"\n", "main.flt", 0,
+                            err, sizeof err);
+    if (!out && strstr(err, "depth"))
+        printf("PASS  pp: cycle caught by depth cap  (%s)\n", err);
+    else { printf("FAIL  pp: cycle  [%s]\n", out ? out : "(null)"); fails++; }
+    free(out);
+
+    remove("build/pp_a.flt");  remove("build/pp_b.flt");
+    remove("build/ppc_a.flt"); remove("build/ppc_b.flt");
+}
+
 int main(void)
 {
     printf("flint core %s + asm\n", FLINT_VERSION);
@@ -297,6 +396,81 @@ int main(void)
         else { printf("FAIL  wrong-branch path leaked out=[%.*s]\n",
                       (int)(outn > 60 ? 60 : outn), out); fails++; }
     }
+
+    /* include machinery */
+    inc_reset();
+    if (run_ctx("include \"part.flt\"\ncode:\nmain:\n    call inc_helper\n"
+                "    copy r0, r1\n"
+                "    exit\n", "main.flt", inc_fake, 0, "inc-part")) {
+        if (last.err == FLINT_OK && outn == 0 && g_rc == 42)
+            printf("PASS  include: code via resolver  [rc=42]\n");
+        else { printf("FAIL  include: code via resolver  rc=%d\n", g_rc); fails++; }
+    }
+    inc_reset();
+    if (run_ctx(".include \"part.flt\"\ncode:\nmain:\n    call inc_helper\n"
+                "    copy r0, r1\n    exit\n", "main.flt", inc_fake, 0,
+                ".include-alias")) {
+        if (last.err == FLINT_OK && outn == 0 && g_rc == 42)
+            printf("PASS  .include alias via resolver  [rc=42]\n");
+        else { printf("FAIL  .include alias via resolver  rc=%d\n", g_rc); fails++; }
+    }
+    inc_reset();
+    if (run_ctx("include \"data.flt\"\n"
+                "code:\n"
+                "main:\n"
+                "    set r1, inc_msg\n"
+                "    load.byte r4, [r1+0]\n"
+                "    copy r0, r4\n"
+                "    sys 1\n"
+                "    inc r1\n"
+                "    load.byte r4, [r1+0]\n"
+                "    copy r0, r4\n"
+                "    sys 1\n"
+                "    set r0, 0\n"
+                "    exit\n", "main.flt", inc_fake, 0,
+                "inc-data"))
+        chk_out("hi", "include: data labels global");
+    inc_reset();
+    if (run_ctx("include \"n1.flt\"\ncode:\nmain:\n    call inc_nested_helper\n"
+                "    copy r0, r1\n    exit\n", "main.flt", inc_fake, 0,
+                "inc-nested")) {
+        if (last.err == FLINT_OK && outn == 0 && g_rc == 7)
+            printf("PASS  include: nested two levels  [rc=7]\n");
+        else { printf("FAIL  include: nested two levels  rc=%d out=[%.*s]\n",
+                      g_rc, (int)(outn > 40 ? 40 : outn), out); fails++; }
+    }
+    inc_reset();
+    if (run_ctx("include \"cyc_a.flt\"\ncode:\nmain:\n    call inc_a\n"
+                "    call inc_b\n    set r0, 0\n    exit\n", "main.flt",
+                inc_fake, 0, "inc-cycle") &&
+        last.err == FLINT_OK)
+        printf("PASS  include: cycle deduped by resolver\n");
+    inc_reset();
+    {
+        flint_prog p; char err[256] = "";
+        if (flint_assemble_ctx("include \"missing.flt\"\ncode:\nmain:\n    exit\n",
+                               "main.flt", inc_fake, 0, &p, 4096,
+                               err, sizeof(err)) == 0) {
+            printf("FAIL  inc-missing: accepted, expected error\n"); fails++;
+            flint_prog_free(&p);
+        } else if (strstr(err, "missing.flt"))
+            printf("PASS  include: missing file rejected  (%s)\n", err);
+        else { printf("FAIL  inc-missing: wrong error [%s]\n", err); fails++; }
+    }
+    inc_reset();
+    {
+        flint_prog p; char err[256] = "";
+        /* plain flint_assemble has no resolver: include must fail with a clear msg */
+        if (flint_assemble("include \"x.flt\"\ncode:\nmain:\n    exit\n",
+                           &p, 4096, err, sizeof(err)) == 0) {
+            printf("FAIL  inc-noresolver: accepted, expected error\n"); fails++;
+            flint_prog_free(&p);
+        } else if (strstr(err, "no resolver"))
+            printf("PASS  include: no resolver -> clear error  (%s)\n", err);
+        else { printf("FAIL  inc-noresolver: wrong error [%s]\n", err); fails++; }
+    }
+
+    t_pp();
 
     chk_reject(S_bad_mnem,  "unknown mnemonic rejected");
     chk_reject(S_bad_label, "undefined label rejected");

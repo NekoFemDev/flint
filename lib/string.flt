@@ -1,0 +1,107 @@
+// string — string helpers, written in FLINT.
+//
+// Usage:   include "string.flt"
+// ABI:     args r1..r3, result r0; r4..r7 may be clobbered.
+//
+// s_strcpy(r1 = dst, r2 = src)   r0 = dst; copies INCLUDING the NUL
+// s_strcat(r1 = dst, r2 = src)   r0 = dst; appends at the NUL of dst
+// s_strcmp(r1, r2)               r0 = 0 if equal, 1 if r1 > r2, -1 if
+//                                r1 < r2 (unsigned byte compare,
+//                                lexicographic)
+// s_upper(r1)                    uppercases ASCII a..z in place, r0 = r1
+// s_lower(r1)                    lowercases ASCII A..Z in place, r0 = r1
+
+// lib/ includes must own their section state: start with code:
+
+code:
+
+s_strcpy:                       // dst in r1 (preserved), src in r2
+    copy r5, r1
+    copy r6, r2
+.sc_loop:
+    load.byte r7, [r6+0]
+    store.byte [r5+0], r7
+    jump.eq r7, .sc_done
+    inc r5
+    inc r6
+    jump .sc_loop
+.sc_done:
+    copy r0, r1
+    return
+
+s_strcat:                       // dst in r1 (preserved), src in r2
+    copy r5, r1
+.sat_tail:
+    load.byte r7, [r5+0]
+    jump.eq r7, .sat_copy
+    inc r5
+    jump .sat_tail
+.sat_copy:
+    copy r6, r2
+.sat_loop:
+    load.byte r7, [r6+0]
+    store.byte [r5+0], r7
+    jump.eq r7, .sat_done
+    inc r5
+    inc r6
+    jump .sat_loop
+.sat_done:
+    copy r0, r1
+    return
+
+s_strcmp:                       // r0 = sign of r1 vs r2, NUL-aware
+    copy r5, r1
+    copy r6, r2
+.scmp_loop:
+    load.byte r7, [r5+0]        // a
+    load.byte r4, [r6+0]        // b
+    jump.ne r7, r4, .scmp_diff
+    jump.eq r7, .scmp_eq        // both 0: equal
+    inc r5
+    inc r6
+    jump .scmp_loop
+.scmp_diff:
+    set r0, 1
+    jump.ge r7, r4, .scmp_out
+    neg r0, r0
+.scmp_out:
+    return
+.scmp_eq:
+    set r0, 0
+    return
+
+s_upper:                        // in-place ASCII uppercase; r0 = r1
+    copy r5, r1
+.sup_loop:
+    load.byte r6, [r5+0]
+    jump.eq r6, .sup_done
+    set r7, 97
+    jump.lt r6, r7, .sup_next   // r6 < 'a'
+    set r7, 123
+    jump.ge r6, r7, .sup_next   // r6 >= 'z' + 1
+    sub r6, r6, 32
+    store.byte [r5+0], r6
+.sup_next:
+    inc r5
+    jump .sup_loop
+.sup_done:
+    copy r0, r1
+    return
+
+s_lower:                        // in-place ASCII lowercase; r0 = r1
+    copy r5, r1
+.slo_loop:
+    load.byte r6, [r5+0]
+    jump.eq r6, .slo_done
+    set r7, 65
+    jump.lt r6, r7, .slo_next   // r6 < 'A'
+    set r7, 91
+    jump.ge r6, r7, .slo_next   // r6 >= 'Z' + 1
+    add r6, r6, 32
+    store.byte [r5+0], r6
+.slo_next:
+    inc r5
+    jump .slo_loop
+.slo_done:
+    copy r0, r1
+    return

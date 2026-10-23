@@ -50,12 +50,27 @@
 extern "C" {
 #endif
 
-#define FLINT_VERSION  "0.1.0"
+#define FLINT_VERSION  "0.1.0-pre.2"
 #define FLINT_NREGS    8
 #define FLINT_MAX_SYS  64
 
 typedef int64_t flint_word;
 typedef uint8_t flint_byte;
+
+/* compile-time guards: the bytecode ISA assumes 8 registers of 64-bit
+ * words; a negative-size array turns a mismatch into a build error */
+typedef char flint__assert_word_is_64[(sizeof(flint_word) == 8) ? 1 : -1];
+typedef char flint__assert_nregs_is_8[(FLINT_NREGS == 8) ? 1 : -1];
+
+/* standard host syscall slots — the table the CLI host implements.
+ * Embedders installing their own handlers may use any numbering. */
+enum {
+    FLINT_SYS_PRINT_STR = 0,  /* r1 = addr, r2 = len: raw bytes out;
+                                 must not clobber registers            */
+    FLINT_SYS_PUTC      = 1,  /* low byte of r0 -> one byte out       */
+    FLINT_SYS_GETC      = 2,  /* one byte in -> r0 (0..255, -1 = EOF) */
+    FLINT_SYS_READ_MEM  = 3   /* reserved: debugger read_mem (stub)   */
+};
 
 typedef struct flint_vm flint_vm;
 typedef void (*flint_syscall)(flint_vm *vm);
@@ -93,7 +108,8 @@ enum {
 };
 
 struct flint_vm {
-    /* registers r0..r7 */
+    /* registers r0..r7 — full 64-bit words. Instruction fields that name
+     * a register carry a single uint8_t index, not the register file. */
     flint_word   r[FLINT_NREGS];
 
     /* host-provided images */
@@ -139,6 +155,30 @@ typedef struct flint_prog {
 /* assembler (isolated TU, never required by a VM-only embed) */
 int  flint_assemble(const char *src, flint_prog *out,
                     uint32_t stack_extra, char *err, uint32_t err_size);
+
+/* standalone include preprocessor (flint_asm.c): textually expands lines
+ *     include "path"      .include "path"
+ * (each path resolved relative to the file containing the directive) and
+ * returns a malloc'd source text ready for flint_assemble(), or NULL with
+ * err filled. max_depth 0 = default (10); cycles die on the cap.
+ * Hosts wired through flint_assemble_ctx(inc_fn) do not need this — the
+ * CLI resolves includes by callback, keeping per-file line numbers. */
+char *flint_pp_includes(const char *src, const char *src_name,
+                        uint32_t max_depth, char *err, uint32_t errsz);
+
+/* include support: the host decides where a quoted path lives.
+ * Return a NUL-terminated source text (malloc'd; the assembler frees it),
+ *   "" (also malloc'd)  = this file was already included once — skip it,
+ *   NULL + err filled   = hard error (include fails at that source line).
+ * from_dir is the directory of the text that contains the include. */
+typedef char *(*flint_include_fn)(void *ud, const char *name,
+                                  const char *from_dir,
+                                  char *err, uint32_t errsz);
+
+int  flint_assemble_ctx(const char *src, const char *src_name,
+                        flint_include_fn inc_fn, void *inc_ud,
+                        flint_prog *out,
+                        uint32_t stack_extra, char *err, uint32_t err_size);
 void flint_prog_free(flint_prog *p);
 
 #define FLINT_ERR_STR(e) flint_errno(e)

@@ -15,26 +15,42 @@
 
 /* ---------------- standard syscalls ---------------- */
 
-/* SYS 0: print r0 as signed decimal + newline */
-static void std_prn(flint_vm *vm)
+static int clif_span(const flint_vm *vm, flint_word addr, flint_word cnt);
+
+/* SYS 0 (FLINT_SYS_PRINT_STR): write the raw byte span mem[r1 .. r1+r2).
+ * Exactly r2 bytes go out — NULs included — and no register is touched. */
+static void std_print_str(flint_vm *vm)
 {
-    printf("%lld\n", (long long)vm->r[0]);
+    flint_word off = vm->r[1];
+    flint_word cnt = vm->r[2];
+
+    if (!clif_span(vm, off, cnt)) return;        /* outside image: no-op */
+    if (cnt > 0) fwrite(vm->mem + off, 1, (size_t)cnt, stdout);
+    fflush(stdout);                              /* prompts stay visible */
 }
 
-/* SYS 1: putc — print low byte of r0 */
+/* SYS 1 (FLINT_SYS_PUTC): print the low byte of r0; stdio-buffered */
 static void std_putc(flint_vm *vm)
 {
     fputc((int)(vm->r[0] & 0xFF), stdout);
 }
 
-/* SYS 2: getc -> r0, -1 on EOF */
+/* SYS 2 (FLINT_SYS_GETC): read one byte into r0; -1 on EOF */
 static void std_getc(flint_vm *vm)
 {
-    int c = fgetc(stdin);
-    vm->r[0] = (c == EOF) ? -1 : (flint_word)c;
+    int c;
+    fflush(stdout);                     /* pending prompt output first */
+    c = fgetc(stdin);
+    vm->r[0] = (c == EOF) ? (flint_word)-1 : (flint_word)(unsigned char)c;
 }
 
-/* SYS 3: regs — dump r0..r7, one per line */
+/* SYS 3 (FLINT_SYS_READ_MEM): reserved for the debugger layer; stub */
+static void std_read_mem(flint_vm *vm)
+{
+    vm->r[0] = -1;                      /* "not implemented" */
+}
+
+/* SYS 9 (CLI_SYS_REGS, debug): dump r0..r7, one per line */
 static void std_regs(flint_vm *vm)
 {
     int i;
@@ -50,6 +66,7 @@ static FILE *clif_tab[CLIF_MAX];
 static long clif_strn(const flint_vm *vm, flint_word addr)
 {
     flint_word i;
+    if (addr < 0) return -1;            /* never index before the image */
     for (i = addr; i < (flint_word)vm->mem_size; i++)
         if (vm->mem[i] == 0) return i - addr;
     return -1;
@@ -148,15 +165,18 @@ static void std_time(flint_vm *vm)
 
 void flint_cli_sysoff(flint_vm *vm)
 {
-    flint_sys_set(vm, 0, std_prn);
-    flint_sys_set(vm, 1, std_putc);
-    flint_sys_set(vm, 2, std_getc);
-    flint_sys_set(vm, 3, std_regs);
-    flint_sys_set(vm, 4, std_fopen);
-    flint_sys_set(vm, 5, std_fclose);
-    flint_sys_set(vm, 6, std_fread);
-    flint_sys_set(vm, 7, std_fwrite);
-    flint_sys_set(vm, 8, std_time);
+    /* stable ABI 0..3 (flint.h); file/time/debug extensions 4..9 */
+    flint_sys_set(vm, FLINT_SYS_PRINT_STR, std_print_str);
+    flint_sys_set(vm, FLINT_SYS_PUTC,      std_putc);
+    flint_sys_set(vm, FLINT_SYS_GETC,      std_getc);
+    flint_sys_set(vm, FLINT_SYS_READ_MEM,  std_read_mem);
+
+    flint_sys_set(vm, CLI_SYS_FOPEN,  std_fopen);
+    flint_sys_set(vm, CLI_SYS_FCLOSE, std_fclose);
+    flint_sys_set(vm, CLI_SYS_FREAD,  std_fread);
+    flint_sys_set(vm, CLI_SYS_FWRITE, std_fwrite);
+    flint_sys_set(vm, CLI_SYS_TIME,   std_time);
+    flint_sys_set(vm, CLI_SYS_REGS,   std_regs);
 }
 
 /* ---------------- file helpers ---------------- */
@@ -180,8 +200,94 @@ static char *read_whole(const char *path, long *out_len)
     return buf;
 }
 
+/* ---------------- runtime helpers ---------------- */
+
+/* ---------------- include resolver ---------------- */
+
+/* search order: includer dir, project root, project lib/, cwd variants */
+#define INC_SEEN_MAX 64
+
+typedef struct {
+    char *seen[INC_SEEN_MAX];
+    int   n;
+    char *root;                 /* project dir or NULL (single file) */
+} inc_ctx;
+
+static void inc_ctx_init(inc_ctx *ic, const char *root)
+{
+    ic->n = 0; ic->root = 0;
+    if (root) {
+        size_t n = strlen(root) + 1;
+        ic->root = (char *)malloc(n);
+        if (ic->root) memcpy(ic->root, root, n);
+    }
+}
+
+static void inc_ctx_free(inc_ctx *ic)
+{
+    int i;
+    for (i = 0; i < ic->n; i++) free(ic->seen[i]);
+    free(ic->root);
+}
+
+static int inc_seen(inc_ctx *ic, const char *real)
+{
+    int i;
+    for (i = 0; i < ic->n; i++)
+        if (strcmp(ic->seen[i], real) == 0) return 1;
+    if (ic->n >= INC_SEEN_MAX) return 0;
+    size_t n = strlen(real) + 1;
+    ic->seen[ic->n] = (char *)malloc(n);
+    if (!ic->seen[ic->n]) return 0;
+    memcpy(ic->seen[ic->n], real, n);
+    ic->n++;
+    return 0;
+}
+
+static char *inc_load(void *ud, const char *name, const char *from_dir,
+                      char *err, uint32_t errsz)
+{
+    inc_ctx *ic = (inc_ctx *)ud;
+    char cand[1024], real[1024];
+    char *dirs[8];              /* search dirs */
+    int nd = 0;
+
+    if (name[0] == '/') {       /* absolute: single candidate */
+        dirs[nd++] = 0;         /* 0 = use name as-is */
+    } else {
+        dirs[nd++] = (char *)from_dir;
+        if (ic->root)  dirs[nd++] = ic->root;
+        if (ic->root)  dirs[nd++] = 0;          /* special: root/lib */
+        dirs[nd++] = (char *)".";
+        dirs[nd++] = 0;                          /* special: ./lib */
+    }
+
+    for (int i = 0; i < nd; i++) {
+        if (dirs[i] == 0) {                       /* lib dir candidate */
+            if (name[0] == '/') continue;
+            if (ic->root) snprintf(cand, sizeof cand, "%.480s/lib/%.480s", ic->root, name);
+            else          snprintf(cand, sizeof cand, "lib/%.480s", name);
+        } else {
+            snprintf(cand, sizeof cand, "%.480s/%.480s", dirs[i], name);
+        }
+        if (!realpath(cand, real)) continue;
+        if (inc_seen(ic, real)) {                 /* already included once */
+            char *z = (char *)malloc(1);
+            if (z) *z = 0;
+            return z;
+        }
+        long len;
+        char *text = read_whole(real, &len);
+        if (!text) continue;                      /* unreadable: next dir */
+        return text;
+    }
+    snprintf(err, errsz, "include \"%.200s\": file not found", name);
+    return 0;
+}
+
 /* run one assembled program; exit code = r0 at HLT, or -(ERR) on trap */
-int flint_cli_run_file(const char *path, uint32_t stack_extra)
+int flint_cli_run_file(const char *path, uint32_t stack_extra,
+                       const char *include_root)
 {
     long len;
     char *src = read_whole(path, &len);
@@ -191,12 +297,16 @@ int flint_cli_run_file(const char *path, uint32_t stack_extra)
     }
 
     flint_prog p; char err[384] = "";
-    if (flint_assemble(src, &p, stack_extra, err, sizeof(err)) != 0) {
-        fprintf(stderr, "flint: %s: %s\n", path, err);
+    inc_ctx ic; inc_ctx_init(&ic, include_root);
+    if (flint_assemble_ctx(src, path, inc_load, &ic, &p, stack_extra,
+                           err, sizeof(err)) != 0) {
+        fprintf(stderr, "flint: %s\n", err);
         free(src);
+        inc_ctx_free(&ic);
         return 1;
     }
     free(src);
+    inc_ctx_free(&ic);
 
     flint_vm vm;
     flint_init(&vm, p.code, p.code_size, p.mem, p.mem_size);
@@ -214,7 +324,8 @@ int flint_cli_run_file(const char *path, uint32_t stack_extra)
     return code;
 }
 
-int flint_cli_check_file(const char *path)
+int flint_cli_check_file(const char *path,
+                       const char *include_root)
 {
     long len;
     char *src = read_whole(path, &len);
@@ -224,10 +335,13 @@ int flint_cli_check_file(const char *path)
     }
 
     flint_prog p; char err[384] = "";
-    int rc = flint_assemble(src, &p, 4096, err, sizeof(err));
+    inc_ctx ic; inc_ctx_init(&ic, include_root);
+    int rc = flint_assemble_ctx(src, path, inc_load, &ic, &p, 4096,
+                                err, sizeof(err));
     free(src);
+    inc_ctx_free(&ic);
     if (rc != 0) {
-        fprintf(stderr, "flint: %s: %s\n", path, err);
+        fprintf(stderr, "flint: %s\n", err);
         return 1;
     }
     printf("flint: %s: ok, %u code bytes\n", path, p.code_size);
@@ -339,7 +453,7 @@ int has_flint_ext_public(const char *s)
 int flint_cli_cmd_run(const char *arg)
 {
     if (arg != 0 && has_flint_ext(arg))
-        return flint_cli_run_file(arg, 65536);
+        return flint_cli_run_file(arg, 65536, 0);
 
     const char *root = arg ? arg : ".";
     char entry[600], err[256];
@@ -348,13 +462,13 @@ int flint_cli_cmd_run(const char *arg)
         fprintf(stderr, "flint: %s\n", err);
         return 2;
     }
-    return flint_cli_run_file(entry, stack);
+    return flint_cli_run_file(entry, stack, root);
 }
 
 int flint_cli_cmd_check(const char *arg)
 {
     if (arg != 0 && has_flint_ext(arg))
-        return flint_cli_check_file(arg);
+        return flint_cli_check_file(arg, 0);
 
     const char *root = arg ? arg : ".";
     char entry[600], err[256];
@@ -363,7 +477,7 @@ int flint_cli_cmd_check(const char *arg)
         fprintf(stderr, "flint: %s\n", err);
         return 2;
     }
-    return flint_cli_check_file(entry);
+    return flint_cli_check_file(entry, root);
 }
 
 int flint_cli_cmd_dis(const char *arg)
@@ -380,12 +494,16 @@ int flint_cli_cmd_dis(const char *arg)
         return 2;
     }
     flint_prog p; char err[384] = "";
-    if (flint_assemble(src, &p, 4096, err, sizeof(err)) != 0) {
-        fprintf(stderr, "flint: %s: %s\n", arg, err);
+    inc_ctx ic; inc_ctx_init(&ic, 0);
+    if (flint_assemble_ctx(src, arg, inc_load, &ic, &p, 4096,
+                           err, sizeof(err)) != 0) {
+        fprintf(stderr, "flint: %s\n", err);
         free(src);
+        inc_ctx_free(&ic);
         return 1;
     }
     free(src);
+    inc_ctx_free(&ic);
     printf("; %u code bytes, entry 0x%04X\n", p.code_size, p.entry);
     int rc = flint_dis(p.code, p.code_size);
     flint_prog_free(&p);
@@ -416,6 +534,16 @@ static const char *NEW_MAIN =
 int flint_cli_cmd_new(const char *dirarg)
 {
     const char *dir = dirarg ? dirarg : ".";
+    struct stat st;
+    char toml[600];
+
+    /* check before creating anything: a refused `new` must not leave
+     * half-scaffolded dirs behind */
+    snprintf(toml, sizeof toml, "%.500s/Flint.toml", dir);
+    if (stat(toml, &st) == 0) {
+        fprintf(stderr, "flint: %s already exists\n", toml);
+        return 1;
+    }
 
     if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
         fprintf(stderr, "flint: cannot create %s: %s\n", dir, strerror(errno));
@@ -426,13 +554,6 @@ int flint_cli_cmd_new(const char *dirarg)
     if (mkdir(sub, 0777) != 0 && errno != EEXIST) {
         fprintf(stderr, "flint: cannot create %s: %s\n", sub, strerror(errno));
         return 2;
-    }
-
-    char toml[600];
-    snprintf(toml, sizeof toml, "%.500s/Flint.toml", dir);
-    if (fopen(toml, "r") != 0) {
-        fprintf(stderr, "flint: %s already exists\n", toml);
-        return 1;
     }
 
     char name[64];
@@ -471,7 +592,7 @@ int flint_cli_cmd_new(const char *dirarg)
 
     printf("created %s\n", dir);
     printf("  Flint.toml\n");
-    printf("  src/main.flint\n");
+    printf("  src/main.flt\n");
     printf("next: flint run %s\n", dir);
     return 0;
 }

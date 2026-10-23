@@ -1,0 +1,158 @@
+// stdlib — core I/O and memory helpers, written in FLINT.
+//
+// Usage:   include "stdlib.flt"          (place this file in lib/ or next
+//                                         to the including file)
+// ABI:     arguments r1..r3, result r0 for these helpers where noted;
+//          r4..r7 may be clobbered.
+//
+// s_print(r1)            print NUL-terminated string at address r1
+// s_strlen(r1)           r0 = length of string at r1
+// s_memcpy(r1, r2, r3)   r0 = dst; copy r3 bytes from r2 (src) to r1 (dst)
+// s_memset(r1, r2, r3)   r0 = dst; fill r3 bytes at r1 with byte r2
+// s_itoa(r1, r2)         decimal text of value r1 into buffer at r2 (>= 22
+//                        bytes); r0 = buf, NUL-terminated, sign first
+// s_num(r1)              print r1 in decimal (uses the internal buffer
+//                        below — NOT reentrant)
+//
+// Host slots (CLI): sys 0 = print span (r1 = addr, r2 = len; raw bytes,
+// clobbers nothing), sys 1 = putc (r0 = one byte), sys 2 = getc -> r0.
+
+// lib/ includes must own their section state: start with code:
+
+code:
+
+s_print:                        // r1 = zstr (preserved); clobbers r2, r5, r7
+    copy r5, r1                 // r5 walks the string
+    set r2, 0                   // r2 = length (sys 0 argument)
+.sl_len:
+    load.byte r7, [r5+0]
+    jump.eq r7, .sl_out         // NUL?
+    inc r5
+    inc r2
+    jump .sl_len
+.sl_out:
+    sys 0                       // print span [r1, r1+r2): raw bytes
+    return
+
+s_strlen:                       // r0 = strlen(r1)
+    copy r5, r1
+    set r6, 0
+.sst_len:
+    load.byte r7, [r5+0]
+    jump.eq r7, .sst_out
+    inc r5
+    inc r6
+    jump .sst_len
+.sst_out:
+    copy r0, r6
+    return
+
+s_memcpy:                       // r1 = dst (preserved), r2 = src, r3 = len
+    copy r4, r1                 // r4 walks dst
+    copy r5, r2                 // r5 walks src
+    copy r6, r3                 // r6 = bytes remaining
+.mc_head:
+    jump.eq r6, .mc_done        // len == 0?
+    load.byte r7, [r5+0]        // src byte
+    store.byte [r4+0], r7       // dst byte
+    inc r4
+    inc r5
+    dec r6
+    jump .mc_head
+.mc_done:
+    copy r0, r1
+    return
+
+s_memset:                       // r1 = dst (preserved), r2 = byte, r3 = len
+    copy r4, r1                 // r4 walks dst
+    copy r5, r3                 // r5 = bytes remaining
+.ms_head:
+    jump.eq r5, .ms_done        // len == 0?
+    store.byte [r4+0], r2       // low byte of r2
+    inc r4
+    dec r5
+    jump .ms_head
+.ms_done:
+    copy r0, r1
+    return
+
+s_itoa:                         // r1 = value, r2 = buf; r0 = buf
+    copy r0, r2
+    // INT64_MIN has no positive magnitude; copy the literal below
+    set r5, 1
+    shl r5, r5, 63              // bit pattern 0x8000...0
+    jump.ne r1, r5, .it_norm
+    set r3, s_itoa_lit
+    copy r4, r2
+.it_min:
+    load.byte r6, [r3+0]
+    store.byte [r4+0], r6
+    jump.eq r6, .it_done        // NUL copied too
+    inc r3
+    inc r4
+    jump .it_min
+
+.it_norm:                       // r3 = magnitude, r6 = digits(n)
+    copy r3, r1
+    jump.ge r1, 0, .it_a
+    neg r3, r1                  // magnitude of a normal negative
+.it_a:
+    set r6, 1                   // digit count starts at 1
+    jump.eq r3, .it_w           // value 0 -> single "0"
+    set r5, 10
+.it_cnt:
+    jump.lt r3, r5, .it_w       // < 10: all digits counted
+    div r3, r3, r5              // r3 /= 10
+    inc r6
+    jump .it_cnt
+
+    // layout: buf[0..off) = '-'?; digits written back from buf+off+n
+.it_w:
+    copy r3, r1                 // magnitude again
+    set r7, 0
+    jump.ge r3, 0, .it_p
+    neg r3, r1
+    set r7, '-'
+    store.byte [r2+0], r7
+    set r7, 1
+    jump .it_q
+.it_p:
+    set r7, 0
+.it_q:
+    copy r4, r2
+    add r4, r4, r7              // base = buf + off
+    add r4, r4, r6              // p = base + n
+    set r5, 0
+    store.byte [r4+0], r5       // NUL
+    // digit 0 special-case
+    jump.ne r3, .it_loop
+    dec r4                      // p--
+    set r5, 48
+    store.byte [r4+0], r5       // '0'
+    jump .it_done
+.it_loop:                       // digits, least significant first
+    set r5, 10
+    div r6, r3, r5              // q
+    mod r7, r3, r5              // digit
+    dec r4
+    add r7, r7, 48              // '0' + digit
+    store.byte [r4+0], r7
+    copy r3, r6
+    jump.ne r3, .it_loop        // while more digits remain
+    jump .it_done
+.it_done:
+    return
+
+s_num:                          // print r1 as decimal (static scratch)
+    copy r5, r1
+    set r2, s_num_buf
+    copy r1, r5
+    call s_itoa
+    copy r1, r0
+    call s_print
+    set r0, 0
+    return
+
+data:
+s_num_buf:  bytes 24            // s_num scratch (zeroed at load)
+s_itoa_lit: str "-9223372036854775808", 0

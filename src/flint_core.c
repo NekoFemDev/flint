@@ -36,7 +36,9 @@ static int chk_reg(flint_vm *vm, uint8_t r)
 /* address helpers: base reg + byte offset against mem_size */
 static int chk_addr(flint_vm *vm, flint_word base, flint_word off, uint32_t n)
 {
-    flint_word a = base + off;
+    /* unsigned addition keeps the sum well-defined on wrap; the range
+     * check below runs on the wrapped value */
+    flint_word a = (flint_word)((uint64_t)base + (uint64_t)off);
     if (a < 0 || a > (flint_word)vm->mem_size - (flint_word)n) {
         vm->err = FLINT_ERR_BADMEM; return 0;
     }
@@ -81,12 +83,14 @@ static void stk_pop(flint_vm *vm, flint_word *v)
 static flint_word wa_div(flint_vm *vm, flint_word a, flint_word b)
 {
     if (b == 0) { vm->err = FLINT_ERR_DIV0; return 0; }
+    if (a == INT64_MIN && b == -1) return INT64_MIN;  /* quotient unrepresentable: pin, no SIGFPE */
     return a / b;
 }
 
 static flint_word wa_mod(flint_vm *vm, flint_word a, flint_word b)
 {
     if (b == 0) { vm->err = FLINT_ERR_DIV0; return 0; }
+    if (a == INT64_MIN && b == -1) return 0;          /* same pair: remainder is 0 */
     return a % b;
 }
 
@@ -182,7 +186,8 @@ int flint_step(flint_vm *vm)
             !rd_u8(vm, &pc, &rb) || !chk_reg(vm, rb) ||
             !rd_i64(vm, &pc, &off)) break;
         if (!chk_addr(vm, vm->r[rb], off, n)) break;
-        vm->r[rd] = mem_load(vm, (uint32_t)(vm->r[rb] + off), n);
+        vm->r[rd] = mem_load(vm,
+            (uint32_t)((uint64_t)vm->r[rb] + (uint64_t)off), n);
         break;
     }
 
@@ -193,7 +198,8 @@ int flint_step(flint_vm *vm)
             !rd_u8(vm, &pc, &ra) || !chk_reg(vm, ra) ||
             !rd_i64(vm, &pc, &off)) break;
         if (!chk_addr(vm, vm->r[rb], off, n)) break;
-        mem_store(vm, (uint32_t)(vm->r[rb] + off), n, vm->r[ra]);
+        mem_store(vm,
+            (uint32_t)((uint64_t)vm->r[rb] + (uint64_t)off), n, vm->r[ra]);
         break;
     }
 
@@ -206,9 +212,9 @@ int flint_step(flint_vm *vm)
             !rd_u8(vm, &pc, &rb) || !chk_reg(vm, rb)) break;
         a = vm->r[ra]; b = vm->r[rb];
         switch (op) {
-        case OP_ADD:  t = a +  b; break;
-        case OP_SUB:  t = a -  b; break;
-        case OP_MUL:  t = a *  b; break;
+        case OP_ADD:  t = (flint_word)((uint64_t)a + (uint64_t)b); break;
+        case OP_SUB:  t = (flint_word)((uint64_t)a - (uint64_t)b); break;
+        case OP_MUL:  t = (flint_word)((uint64_t)a * (uint64_t)b); break;
         case OP_AND:  t = a &  b; break;
         case OP_OR:   t = a |  b; break;
         case OP_XOR:  t = a ^  b; break;
@@ -234,9 +240,9 @@ int flint_step(flint_vm *vm)
             !rd_i64(vm, &pc, &b)) break;
         a = vm->r[ra];
         switch (op) {
-        case OP_ADDI: t = a +  b; break;
-        case OP_SUBI: t = a -  b; break;
-        case OP_MULI: t = a *  b; break;
+        case OP_ADDI: t = (flint_word)((uint64_t)a + (uint64_t)b); break;
+        case OP_SUBI: t = (flint_word)((uint64_t)a - (uint64_t)b); break;
+        case OP_MULI: t = (flint_word)((uint64_t)a * (uint64_t)b); break;
         case OP_ANDI: t = a &  b; break;
         case OP_ORI:  t = a |  b; break;
         case OP_XORI: t = a ^  b; break;
@@ -257,13 +263,17 @@ int flint_step(flint_vm *vm)
     case OP_NOT:
         if (!rd_u8(vm, &pc, &rd) || !chk_reg(vm, rd) ||
             !rd_u8(vm, &pc, &ra) || !chk_reg(vm, ra)) break;
-        vm->r[rd] = (op == OP_NEG) ? -vm->r[ra] : ~vm->r[ra];
+        vm->r[rd] = (op == OP_NEG)
+                  ? (flint_word)(-(uint64_t)vm->r[ra])
+                  : ~vm->r[ra];
         break;
 
     case OP_INC:
     case OP_DEC:
         if (!rd_u8(vm, &pc, &rd) || !chk_reg(vm, rd)) break;
-        vm->r[rd] += (op == OP_INC) ? 1 : -1;
+        vm->r[rd] = (op == OP_INC)
+                  ? (flint_word)((uint64_t)vm->r[rd] + 1u)
+                  : (flint_word)((uint64_t)vm->r[rd] - 1u);
         break;
 
     /* fused branches: absolute target */

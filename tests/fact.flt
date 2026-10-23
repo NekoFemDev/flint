@@ -1,9 +1,12 @@
+include "stdlib.flt"
+
 code:
 main:
     set r0, 6
     call fact
-    copy r0, r1
-    sys 0                     // 720
+    call s_num                // r1 = 720 -> sys 0 span print
+    set r0, 10
+    sys 1
     exit
 
 fact:

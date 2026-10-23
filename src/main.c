@@ -60,9 +60,9 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "dis") == 0)
         return flint_cli_cmd_dis(argc >= 3 ? argv[2] : 0);
 
-    /* convenience: `flint path/file.flint` == `flint run path/file.flint` */
+    /* convenience: `flint path/file.flt` == `flint run path/file.flt` */
     if (has_flint_ext_public(cmd))
-        return flint_cli_run_file(cmd, 65536);
+        return flint_cli_run_file(cmd, 65536, 0);
 
     usage(stderr);
     return 2;
