@@ -11,7 +11,7 @@
  *   JEQ..JHS rs,rt,tgt(11) | JxxI rs,imm,tgt(18)
  *   JMP/CALL tgt(9) | RET(1) | ENTER size(10) | LEAVE(1)
  *   PUSH rs(2) | PUSHI imm(9) | POP rd(2)
- *   ALLOC rd,size(10) | FREE rs(2)
+ *   ALLOC rd,size(10) | FREE rs(2) | GC(1)
  *
  * Unknown opcode or truncated tail: prints what it reached and stops
  * with a nonzero return — a corrupt stream is never guessed past.
@@ -62,7 +62,8 @@ static const char *const names[OP_COUNT] = {
     [OP_PUSH]    = "push",  [OP_PUSHI] = "push",
     [OP_POP]     = "pop",
     [OP_ALLOC]   = "alloc",
-    [OP_FREE]    = "free"
+    [OP_FREE]    = "free",
+    [OP_GC]      = "gc"
 };
 
 static int op_len(flint_byte op)
@@ -75,7 +76,7 @@ static int op_len(flint_byte op)
         return 3;
     case OP_SET: case OP_ALLOC:
         return 10;
-    case OP_HLT: case OP_RET: case OP_LEAVE:
+    case OP_HLT: case OP_RET: case OP_LEAVE: case OP_GC:
         return 1;
     case OP_JMP: case OP_CALL: case OP_PUSHI:
         return 9;
@@ -148,6 +149,7 @@ int flint_dis(const flint_byte *code, uint32_t n)
         case OP_HLT:   P("%s", names[op]); break;
         case OP_RET:   P("%s", names[op]); break;
         case OP_LEAVE: P("%s", names[op]); break;
+        case OP_GC:    P("%s", names[op]); break;
         case OP_SET:
         case OP_ALLOC:
             rd = code[pc++];

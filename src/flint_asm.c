@@ -14,7 +14,7 @@
  *   mnemonics  set copy load[.byte] loadx store[.byte] storx
  *              add sub mul div mod and or xor shl shr inc dec neg not
  *              jump[.eq .ne .lt .ge .lo .hs] call return enter leave
- *              push pop alloc free sys exit
+ *              push pop alloc free gc sys exit
  *   registers  r0..r15
  *   mem        [rN]  [rN+num]  [rN-num]  [rN+rM]  [fp±num]  [fp+rM]
  *              (store: address first)
@@ -507,7 +507,7 @@ enum {
     N_SET, N_COPY, N_LOAD, N_LOADB, N_LOADX, N_STORE, N_STOREB, N_STORX,
     N_ARITH, N_INC, N_DEC, N_NEG, N_NOT,
     N_JUMP, N_BRANCH, N_CALL, N_RET, N_ENTER, N_LEAVE,
-    N_PUSH, N_POP, N_ALLOC, N_FREE, N_SYS, N_EXIT,
+    N_PUSH, N_POP, N_ALLOC, N_FREE, N_GC, N_SYS, N_EXIT,
     D_STR, D_INT, D_BYTES
 };
 
@@ -551,6 +551,7 @@ static const mnem_t g_tab[] = {
     {"pop",        N_POP,   0, 0},
     {"alloc",      N_ALLOC, 0, 0},
     {"free",       N_FREE,  0, 0},
+    {"gc",         N_GC,    0, 0},
     {"sys",        N_SYS,   0, 0},
     {"exit",       N_EXIT,  0, 0},
     {"str",        D_STR,   0, 0},
@@ -805,12 +806,18 @@ static void m_alloc(asmx *a)
     e_cst(a, OP_ALLOC); e_regb(a, rd); e_field(a, &o, F_ANY);
 }
 
-/* free rs         -> validated no-op (auto: RET reclaims; manual: caller) */
+/* free rs         -> validated no-op (auto: the collector owns lifetime) */
 static void m_free(asmx *a)
 {
     int rs; token t;
     if (!parse_reg(a, &rs, &t)) return;
     e_cst(a, OP_FREE); e_regb(a, rs);
+}
+
+/* gc              -> run a collection in auto mode (no-op in manual) */
+static void m_gc(asmx *a)
+{
+    e_cst(a, OP_GC);
 }
 
 static void m_sys(asmx *a)
@@ -1061,6 +1068,7 @@ static int asm_statement(asmx *a, const mnem_t *m, const char *nm)
     case N_POP:    m_pop(a);      break;
     case N_ALLOC:  m_alloc(a);    break;
     case N_FREE:   m_free(a);     break;
+    case N_GC:     m_gc(a);       break;
     case N_SYS:    m_sys(a);      break;
     case N_EXIT:   m_exit(a);     break;
     case D_STR:    d_str(a);      break;

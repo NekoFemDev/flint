@@ -1,12 +1,13 @@
-# FLINT 0.2.0-pre.3
+# FLINT 0.3.0-pre.1
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.
 No dependencies, no global state, no flags register.
 
 ```
-vm core:       ~55 opcodes, word = int64, 16 registers, flat memory
-embed core:    include/flint.h + src/flint_core.c   (zero libc)
+vm core:       ~56 opcodes, word = int64, 16 registers, flat memory
+embed core:    include/flint.h + src/flint_core.c + src/flint_gc.c
+               (zero libc; flint_gc.c is the auto-mode mark-sweep collector)
                + src/flint_asm.c                    (only if asm→bytecode is needed)
 executable:    + src/flint_cli.c + src/main.c       (CLI host: stdio + POSIX file syscalls)
                + src/flint_img.c                    (host-side: .fbc image container)
@@ -37,6 +38,24 @@ Stack, data and heap share one `mem` image:
 The assembled memory image (from `flint_assemble`) is **zeroed** — `bytes N`
 and everything past the data section reads as zeros until first written.
 
+The allocator is selected by the project memory model (a real switch
+since v0.3.0; it also travels inside `.fbc` images and standalone ELFs):
+
+- **manual** — `alloc` is a bump allocator: the cursor starts at the
+  aligned end of the data section and grows up; blocks are never reclaimed
+  automatically (`free` is a validated no-op) and a `return` never
+  rewinds the cursor.
+- **auto** — `alloc` is served by a bundled **conservative, non-moving
+  mark-sweep collector**. Every block carries a 16-byte header before
+  its payload; `alloc` returns the zeroed payload. A block stays valid
+  while a register, the active stack, the data section or a host
+  root/pin reaches it (interior pointers count); unreachable blocks —
+  **cycles included** — are reclaimed whenever the collector runs: on a
+  byte threshold (default 32 KiB), on allocation failure, at an explicit
+  `gc`, or from the host. In auto mode `enter N` zeroes the fresh frame
+  and the VM zeroes the scratch region at startup so conservative
+  scanning starts clean.
+
 A program ends with `exit` (opcode `HLT`). The program's return code is **r0
 at exit time**. `flint_run` returns r0 to an embedded host. In the CLI, r0 is
 first narrowed to a C `int` with `r0 & 0x7FFFFFFF`; the operating system then
@@ -53,6 +72,7 @@ flint new <dir> [--memory auto|manual]   scaffold a project (prompts if omitted)
 flint build <file.flt|dir> [-o out] [--elf]  build .fbc image / standalone ELF
 flint run <file.flt|file.fbc>            run a source file or a built image
 flint run [dir]                          run a project (default: current directory)
+flint run [<arg>] [--gc-stats] [--gc-stress] [--memory auto|manual]
 flint check <file.flt|file.fbc>          assemble/validate without executing
 flint check [dir]                        check a project
 flint dis <file.flt|file.fbc>            print bytecode disassembly
@@ -61,13 +81,20 @@ flint --version
 
 Shortcut: `flint path/file.flt` ≡ `flint run path/file.flt` (same for `.fbc`).
 
+`run` options: `--gc-stats` prints a collector report to stderr after the
+run; `--gc-stress` forces a collection before every allocation;
+`--memory auto|manual` overrides the project model for a single file or
+directory (and a `.fbc` image's stored model). The environment variables
+`FLINT_GC_STRESS=1` and `FLINT_GC_STATS=1` do the same without flags —
+the standalone ELF stub honors them too.
+
 CLI exit codes:
 
 | Code | Meaning                                            |
 |------|----------------------------------------------------|
 | 0    | program ran, r0 = 0                                |
 | N    | program ran, r0 = N (N < 2^31; the shell observes N & 0xFF) |
-| −err | runtime trap; `err` is a `FLINT_ERR_*` code: −1 NOSYS, −2 BADPC, −3 BADOP, −4 BADREG, −5 BADMEM, −6 STACK, −7 DIV0, −8 LIMIT, −9 INIT |
+| −err | runtime trap; `err` is a `FLINT_ERR_*` code: −1 NOSYS, −2 BADPC, −3 BADOP, −4 BADREG, −5 BADMEM, −6 STACK, −7 DIV0, −8 LIMIT, −9 INIT, −10 OOM (managed heap exhausted) |
 | 1    | assembly error (source line and reason go to stderr) |
 | 2    | file/project could not be read                      |
 
@@ -115,7 +142,7 @@ fields little-endian u32:
 | 12     | mem_size                           |
 | 16     | entry (main's code offset)         |
 | 20     | heap_start                         |
-| 24     | mem_mode (0 manual / 1 auto)       |
+| 24     | mem_mode (0 manual / 1 auto — auto runs on the collector) |
 | 28     | checksum (FNV-1a over code, mem)   |
 | 32     | code image, then mem image         |
 
@@ -174,7 +201,7 @@ string values are quoted. Keys:
 | `name` | directory name   | plain project name                        |
 | `entry`| `src/main.flt` | path to the main program (relative to project root) |
 | `stack`| `65536`          | extra memory bytes reserved for the stack |
-| `memory` | `"manual"`     | memory model: `"manual"` (`alloc`-driven) or `"auto"` (`enter`/`leave` frames); picks the starter `flint new` writes, informational at run time (`return` never rewinds the heap cursor) |
+| `memory` | `"manual"`     | allocator: `"manual"` (bump arena; `alloc` blocks are never reclaimed) or `"auto"` (conservative mark-sweep collector; unreachable blocks — cycles included — are reclaimed, `alloc` returns a managed zeroed payload). The mode travels into `.fbc` images, standalone ELFs and the starter `flint new` writes |
 
 The legacy v0.1 key `use_hand_made_ram_control` is still accepted
 (`true` = manual, `false` = auto); if both keys appear, the later line
@@ -182,7 +209,8 @@ wins.
 
 Run from inside a project directory: `flint run` (no arguments).
 Single-file runs (`flint run file.flt`) have no project file and use the
-default memory model (`manual`; informational at run time).
+default memory model (`manual`); `flint run --memory auto file.flt`
+overrides it.
 
 ---
 
@@ -381,34 +409,53 @@ per level) runs as-is. Functions that need locals use `enter N` /
 `leave`; the slots are `[fp-8]`, `[fp-16]`, … and the callee is
 responsible for preserving `r12..r15` (push/pop around the body).
 
-### Memory allocation (bump allocator)
+### Memory allocation
 
-A bump-allocator arena sits between the data section and the stack: the
-cursor starts at the aligned end of the data image and grows up, while
-the stack grows down from the end of memory. A block that would cross
-the stack pointer traps as a bad memory access; an `enter` frame that
-would grow into the heap traps as a stack violation.
+Two models share one heap region between the data section and the stack
+(the cursor grows up, the stack grows down; a block that would cross the
+stack pointer fails, and an `enter` frame that would grow into the heap
+traps as a stack violation). The model is picked by `Flint.toml`,
+`--memory`, or the defaults above.
 
-| Form            | Bytes | Semantics                                        |
-|-----------------|-------|--------------------------------------------------|
-| `alloc rd, imm` | 10    | rd = heap cursor; cursor += imm                  |
-| `free rs`       | 2     | operand validated; no-op (bump allocator)        |
+**manual — bump arena.** `alloc rd, n` returns the cursor and moves it
+up by n. `return` never rewinds the cursor: a callee's block stays
+valid, so returning an array from a function is safe. `free` is a
+validated no-op — blocks have no size metadata to reclaim by, so
+reclamation is the program's problem.
+
+**auto — managed heap (conservative mark-sweep).** `alloc rd, n`
+returns the zeroed payload of a collector-managed block (a 16-byte
+header sits before the payload; a reused block may be slightly larger
+than requested). `free` stays a no-op — the collector owns lifetime:
+a block stays valid while any register, active stack word, data word,
+host root or pin reaches it; interior pointers mark the containing
+block; cycles are collectable. The collector runs when the bytes
+allocated since the last collection pass a threshold (default 32 KiB),
+whenever an allocation does not fit and reclamation could help, at an
+explicit `gc`, or from the host (`flint_gc_collect`). If nothing can be
+reclaimed and the block still does not fit, the VM traps
+`FLINT_ERR_OOM` (−10). Manual mode is completely unchanged by this.
+
+| Form            | Bytes | Semantics                                          |
+|-----------------|-------|----------------------------------------------------|
+| `alloc rd, imm` | 10    | manual: rd = heap cursor; cursor += imm            |
+|                 |       | auto: rd = zeroed payload of a managed block       |
+| `free rs`       | 2     | operand validated; no-op in both modes             |
+| `gc`            | 1     | auto: collect now; manual: no-op                   |
 
 ```
-alloc r1, 64        // r1 = block address; the cursor moves up
-free r1             // validated no-op today
+alloc r1, 64        // r1 = block address (manual cursor / auto payload)
+free r1             // validated no-op in both modes
+gc                  // auto: reclaim everything unreachable, cycles included
 ```
 
-Since v0.2.0 `return` never rewinds the cursor: an allocation made by a
-callee remains valid after the caller regains control, so returning an
-allocated array from a function is safe. The `Flint.toml` `memory` key
-(`"manual"` / `"auto"`) selects the starter style `flint new` writes —
-`alloc`-driven or `enter`/`leave` frames — and is informational at run
-time; the legacy v0.1 key `use_hand_made_ram_control` is accepted for
-compatibility.
-
-`free` is deliberately a validated no-op: real reclaim needs per-block
-size metadata (planned upgrade: a size word at `rd-8`, LIFO reclaim).
+Conservative-GC caveats (auto mode): *false retention* is possible — an
+integer or stale word that happens to land inside a payload keeps that
+block alive (bounded by the number of root words); pointers stored at
+unaligned addresses are missed (scanning walks aligned words); and a
+program that writes outside its blocks can corrupt block headers, which
+traps `FLINT_ERR_BADMEM` at the next collector walk. The collector is
+non-moving, so addresses never change under a running program.
 
 ### Platform
 
@@ -499,6 +546,33 @@ flint_run(...);                        /* err == FLINT_ERR_LIMIT on runaway loop
 `flint_step(&vm)` — exactly one instruction per call — for
 debuggers/tracers.
 
+### Automatic memory API (auto mode)
+
+```c
+flint_heap_set(&vm, heap_start, FLINT_MEM_AUTO);  /* arms the collector */
+
+flint_gc_set_threshold(&vm, 65536);   /* bytes between proactive collections
+                                         (0 = collect on allocation failure only) */
+flint_gc_set_stress(&vm, 1);          /* collect before every allocation */
+
+flint_gc_stats gs;
+flint_gc_get_stats(&vm, &gs);         /* collections, live/free/alloc/
+                                         reclaimed bytes, threshold, rescans */
+
+flint_gc_collect(&vm);                /* explicit collection */
+flint_word p = flint_gc_alloc(&vm, 64);   /* 0 + vm.err == FLINT_ERR_OOM */
+flint_gc_free(&vm, p);                /* explicit release, validated
+                                         (traps invalid/double free) */
+```
+
+The collector state (including its mark worklist) lives inside
+`flint_vm`; `flint_gc.c` needs no libc and no allocation of its own.
+Hosts that keep a raw payload pointer outside the VM must register it
+before letting a collection run — `flint_gc_root(vm, &slot)` for a
+`flint_word` slot the host owns, or `flint_gc_pin(vm, addr)` for a
+plain address. Conservative scanning finds pointers in VM memory
+(registers, stack, data), not in host structs.
+
 ### Errors
 
 ```c
@@ -517,13 +591,14 @@ const char *txt = vm.err_text;         /* human-readable line */
 
 ```
 make          # build/flint + build/stub.elf (--elf stub)
-make test     # full bench: core + asm + heap + examples
+make test     # full bench: core + asm + heap + gc + examples + the
+              # tests/gc.sh integration run (4 exec paths x base64 vs base64 -w0)
 make bench    # build the bench examples + compare run speeds
 make clean
 ```
 
-Embedding is minimal: `flint_core.c` (+ `flint_asm.c` if you want source
-assembly) is one TU each; build with `-I include`.
+Embedding is minimal: `flint_core.c` + `flint_gc.c` (+ `flint_asm.c` if
+you want source assembly) is one TU each; build with `-I include`.
 
 ---
 
@@ -554,6 +629,12 @@ Demo (project form):
 
 ```
 examples/b64-demo/       base64 encoder — stdin → stdout, RFC 4648 (≈ `base64 -w0`)
+examples/b64-mem/        same encoder, chunked: allocs a fresh input block + output
+                         block per 3 KiB chunk and never frees — the auto-mode
+                         collector reclaims each chunk. Passes 1 MiB in
+                         run/.fbc/ELF; the same program in manual mode dies at
+                         the 10th chunk (36 KiB of output, rc=251).
+                         `sh tests/gc.sh` diffs every path.
 ```
 
 Run the demo: `printf 'foobar' | flint run examples/b64-demo` → `Zm9vYmFy`;

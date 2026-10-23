@@ -56,14 +56,25 @@
  *   OP_PUSH    rs:u8
  *   OP_PUSHI   imm:i64
  *   OP_POP     rd:u8
- *   OP_ALLOC   rd:u8  size:i64   (mem: rd = heap cursor, cursor += size)
- *   OP_FREE    rs:u8             (operand validated; no-op bump allocator)
+ *   OP_ALLOC   rd:u8  size:i64   (manual: rd = heap cursor, cursor += size;
+ *                                 auto: rd = managed block payload, zeroed)
+ *   OP_FREE    rs:u8             (operand validated; no-op — see below)
+ *   OP_GC      -                 (auto: collect now; manual: no-op)
  *
- * RAM control: OP_ALLOC is a bump allocator. Since v0.2.0 a RETURN never
- * rewinds the cursor — an allocated block stays valid after the function
- * that allocated it returns (returning an array is safe). The project
- * memory model (Flint.toml `memory`, flint_mem_mode) is informational:
- * it picks how a program manages storage, not runtime behavior.
+ * RAM control: the memory model (Flint.toml `memory`, flint_mem_mode)
+ * selects the allocator (v0.3.0):
+ *   manual — a bump allocator over [heap_start, sp). A RETURN never
+ *            rewinds the cursor, so a returned block stays valid; `free`
+ *            is a validated no-op (no size metadata to reclaim by).
+ *   auto   — a conservative, non-moving mark-sweep collector
+ *            (src/flint_gc.c). `alloc` returns the payload of a managed
+ *            block (16-byte header before it, payload zeroed); garbage —
+ *            cycles included — is reclaimed when unreachable from
+ *            registers, the active stack, the data section, host roots
+ *            and pins. The collector runs on allocation thresholds,
+ *            allocation failure, and the `gc` instruction /
+ *            flint_gc_collect(). `free` stays a no-op: the collector
+ *            owns lifetime; hosts can call flint_gc_free() instead.
  */
 #ifndef FLINT_H
 #define FLINT_H
@@ -73,7 +84,7 @@
 extern "C" {
 #endif
 
-#define FLINT_VERSION  "0.2.0-pre.3"
+#define FLINT_VERSION  "0.3.0-pre.1"
 #define FLINT_NREGS    16
 #define FLINT_MAX_SYS  64
 /* pseudo-register used in address-base fields; never a general register */
@@ -104,14 +115,19 @@ enum {
 };
 
 /* memory model — how a program manages its storage (Flint.toml `memory`).
- * FLINT_MEM_MANUAL: the program calls `alloc` and owns its blocks
- *                   (bump-allocator arena; `free` is a validated no-op
- *                   for now);
- * FLINT_MEM_AUTO:   locals live in `enter`/`leave` frames — the VM
- *                   reserves a frame on entry and releases it on leave.
- * The mode travels with the VM for hosts/tools and picks the `flint new`
- * starter; it does not change interpreter semantics (since v0.2.0 RETURN
- * never rewinds the heap cursor in either mode). */
+ * FLINT_MEM_MANUAL: `alloc` is a bump allocator; blocks are never
+ *                   reclaimed automatically; `free` is a validated no-op.
+ * FLINT_MEM_AUTO:   `alloc` is served by the bundled conservative,
+ *                   non-moving mark-sweep collector (src/flint_gc.c): a
+ *                   block of at least the requested size (payload zeroed)
+ *                   comes from a first-fit free list or the bump frontier;
+ *                   unreachable blocks — cycles included — are reclaimed
+ *                   at collection points (allocation failure, threshold,
+ *                   the `gc` opcode or flint_gc_collect()). `free` stays a
+ *                   no-op; managed lifetime belongs to the collector.
+ * The mode travels with the VM (and in .fbc/ELF images) and is a real
+ * allocator switch since v0.3.0 — auto mode is a breaking semantic
+ * change from the v0.2 informational flag. */
 typedef enum {
     FLINT_MEM_MANUAL = 0,
     FLINT_MEM_AUTO   = 1
@@ -135,7 +151,7 @@ enum {
     OP_JLO, OP_JLOI, OP_JHS, OP_JHSI,   /* unsigned pairs (below / higher-same) */
     OP_JMP, OP_CALL, OP_RET, OP_ENTER, OP_LEAVE,
     OP_PUSH, OP_PUSHI, OP_POP,
-    OP_ALLOC, OP_FREE,
+    OP_ALLOC, OP_FREE, OP_GC,
     OP_COUNT
 };
 
@@ -147,12 +163,95 @@ enum {
     FLINT_ERR_BADPC  = 2,   /* pc out of code bounds                        */
     FLINT_ERR_BADOP  = 3,   /* unknown opcode byte                          */
     FLINT_ERR_BADREG = 4,   /* register index outside 0..15                 */
-    FLINT_ERR_BADMEM = 5,   /* address outside memory bounds                */
+    FLINT_ERR_BADMEM = 5,   /* address outside memory bounds (or corrupt
+                               managed-heap block header in auto mode)      */
     FLINT_ERR_STACK  = 6,   /* stack underflow/overflow                     */
     FLINT_ERR_DIV0   = 7,   /* division/modulo by zero                      */
     FLINT_ERR_LIMIT  = 8,   /* max_steps exceeded                           */
-    FLINT_ERR_INIT   = 9    /* init called with bad buffers                 */
+    FLINT_ERR_INIT   = 9,   /* init called with bad buffers                 */
+    FLINT_ERR_OOM    = 10   /* managed heap exhausted after a collection    */
 };
+
+/* ---- automatic memory: conservative mark-sweep collector (auto mode) ----
+ *
+ * Managed heap layout inside the existing mem image: blocks are contiguous
+ * from gc.heap_begin (heap_start rounded up to 16) to heap_ptr (the bump
+ * frontier). Every block starts with a 16-byte flint_gc_header; `alloc`
+ * returns the payload pointer (header + 16). A block that will not fit
+ * below sp fails; if a collection then frees nothing usable the VM traps
+ * FLINT_ERR_OOM.
+ *
+ * Roots are scanned conservatively: registers r0..r15, the active stack
+ * [sp, mem_size), the data section [0, heap_start) and host-registered
+ * roots/pins. A word is a candidate pointer when it lands anywhere inside
+ * the payload of an allocated block (interior pointers mark the
+ * containing block); every other word is ignored. The collector is
+ * non-moving and non-recursive (fixed mark worklist + a full-rescan slow
+ * path on overflow). False retention is possible — an integer, a return
+ * pc or other stale value that "looks like" an address keeps a block
+ * alive — and is bounded by the number of root words; it is documented,
+ * not eliminated. Pointers stored at unaligned addresses are missed
+ * (aligned-word scanning); store pointers at 8-byte-aligned addresses.
+ *
+ * The header `next` field is reserved (set to FLINT_GC_NIL); free blocks
+ * are found by walking the block sequence in address order (first fit),
+ * and adjacent free blocks are coalesced during sweep. */
+#define FLINT_GC_MAGIC   0x4D474C46u  /* "FLGM" as bytes F,L,G,M (LE)     */
+#define FLINT_GC_HDR     16u          /* header bytes before the payload  */
+#define FLINT_GC_ALIGN   8u           /* payload size/scan granularity    */
+#define FLINT_GC_NIL     0xFFFFFFFFu  /* no block (reserved header field) */
+#define FLINT_GC_F_ALLOC 0x1u         /* block is allocated               */
+#define FLINT_GC_F_MARK  0x2u         /* block marked this cycle          */
+#define FLINT_GC_MARKSTACK  1024u     /* fixed mark worklist (block ads)  */
+#define FLINT_GC_ROOTS_MAX  8u        /* host root slots per VM           */
+#define FLINT_GC_PINS_MAX   8u        /* host pins per VM                 */
+#define FLINT_GC_DEFAULT_THRESHOLD 32768u /* bytes between proactive GCs  */
+
+/* managed block header (little-endian u32 fields, byte-addressed) */
+typedef struct {
+    uint32_t size;    /* payload bytes (multiple of 8)                  */
+    uint32_t flags;   /* FLINT_GC_F_*                                   */
+    uint32_t next;    /* reserved for a free-list chain; FLINT_GC_NIL   */
+    uint32_t magic;   /* FLINT_GC_MAGIC (validation)                    */
+} flint_gc_header;
+
+/* collector statistics — a snapshot, see flint_gc_get_stats */
+typedef struct {
+    uint32_t collections;      /* completed collections                    */
+    uint32_t bytes_live;       /* payload bytes in allocated blocks        */
+    uint32_t bytes_free;       /* payload bytes in free blocks             */
+    uint32_t bytes_alloced;    /* lifetime payload bytes handed out        */
+    uint32_t bytes_reclaimed;  /* lifetime payload bytes swept             */
+    uint32_t threshold;        /* proactive collection threshold (bytes)   */
+    uint32_t overflow_rescans; /* mark-stack-overflow slow-path passes     */
+    uint8_t  enabled;          /* 1 in auto mode, 0 in manual              */
+    uint8_t  stress;           /* collect before every allocation         */
+} flint_gc_stats;
+
+/* collector state — public because it lives inside flint_vm (zero hidden
+ * state, zero allocation); treat fields as internal where possible. */
+typedef struct {
+    uint8_t  enabled;
+    uint8_t  stress;
+    uint8_t  oflow;                 /* mark stack overflowed (internal)    */
+    uint32_t since;                 /* bytes allocated since last collect  */
+    uint32_t threshold;
+    uint32_t collections;
+    uint32_t bytes_live;
+    uint32_t bytes_free;
+    uint32_t bytes_alloced;
+    uint32_t bytes_reclaimed;
+    uint32_t overflow_rescans;
+    uint32_t heap_begin;            /* first managed block (16-aligned)    */
+    uint32_t msp;                   /* mark worklist depth (internal)      */
+    uint32_t find_blk, find_end;    /* lookup cache: payload span of the
+                                       last hit (internal)                 */
+    uint32_t markstack[FLINT_GC_MARKSTACK];
+    flint_word *roots[FLINT_GC_ROOTS_MAX];
+    uint32_t   nroots;
+    flint_word pins[FLINT_GC_PINS_MAX];
+    uint32_t   npins;
+} flint_gc_state;
 
 struct flint_vm {
     /* registers r0..r15 — full 64-bit words. Instruction fields that name
@@ -169,9 +268,11 @@ struct flint_vm {
     uint32_t     pc;           /* byte offset into code */
     uint32_t     sp;           /* top-of-stack pointer, init = mem_size */
     flint_word   fp;           /* frame pointer: [sp, fp) is the local area */
-    uint32_t     heap_ptr;     /* bump-allocator cursor (OP_ALLOC) */
-    uint32_t     heap_start;   /* bottom of the heap arena */
-    flint_mem_mode mem_mode;   /* manual / auto (flint_mem_mode); informational */
+    uint32_t     heap_ptr;     /* bump frontier (OP_ALLOC); in auto mode it
+                                  is also the end of the managed blocks */
+    uint32_t     heap_start;   /* bottom of the heap (auto: 16-aligned) */
+    flint_mem_mode mem_mode;   /* manual / auto — a real allocator switch */
+    flint_gc_state gc;         /* auto-mode collector (src/flint_gc.c) */
     uint32_t     steps;
     uint32_t     max_steps;    /* 0 = unlimited */
     uint8_t      halted;
@@ -191,9 +292,30 @@ void  flint_init(flint_vm *vm,
 void  flint_sys_set(flint_vm *vm, int slot, flint_syscall fn);
 /* heap configuration, call after flint_init. heap_start = first
  * allocatable offset (the CLI passes flint_prog.heap_start, the aligned
- * end of the data image); host-built images pick their own. mode records
- * the project memory model; it no longer changes RETURN behaviour. */
+ * end of the data image); host-built images pick their own. mode selects
+ * the allocator (v0.3.0): manual = the bump arena (unchanged), auto =
+ * the managed mark-sweep heap — auto rounds heap_start up to 16 and
+ * zeroes the scratch region [heap_start, mem_size) so conservative
+ * scanning starts clean. Call once, right after flint_init. */
 void  flint_heap_set(flint_vm *vm, uint32_t heap_start, flint_mem_mode mode);
+
+/* ---- automatic memory API (auto mode; see src/flint_gc.c) ----
+ * All of these are safe to call on a manual-mode VM: collect/stats and
+ * the root/pin registration are no-ops or harmless, while
+ * flint_gc_alloc/free set FLINT_ERR_INIT (misuse). A host that keeps a
+ * raw pointer into a managed payload outside the VM roots must pin it
+ * before letting a collection run. */
+void flint_gc_init(flint_vm *vm);   /* flint_heap_set calls this in auto */
+void flint_gc_collect(flint_vm *vm);       /* mark-sweep now (manual: no-op) */
+flint_word flint_gc_alloc(flint_vm *vm, uint32_t size); /* payload, 0 = OOM */
+void flint_gc_free(flint_vm *vm, flint_word payload);    /* explicit release */
+void flint_gc_get_stats(const flint_vm *vm, flint_gc_stats *out);
+void flint_gc_set_threshold(flint_vm *vm, uint32_t bytes); /* 0 = fail-only */
+void flint_gc_set_stress(flint_vm *vm, int on);
+int  flint_gc_root(flint_vm *vm, flint_word *slot);  /* 0 ok, -1 (null/full) */
+int  flint_gc_unroot(flint_vm *vm, flint_word *slot);    /* 0 ok, -1 unknown */
+int  flint_gc_pin(flint_vm *vm, flint_word addr);    /* 0 ok, -1 (full) */
+int  flint_gc_unpin(flint_vm *vm, flint_word addr);  /* 0 ok, -1 unknown */
 
 /* execution: returns r[0] at HLT; negative values = -FLINT_ERR_* */
 flint_word  flint_run(flint_vm *vm, uint32_t entry);

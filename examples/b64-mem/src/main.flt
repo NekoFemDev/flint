@@ -1,0 +1,127 @@
+// b64-mem — chunked base64 encoder over the managed (auto) heap.
+// Reads stdin in 3 KiB chunks, allocates a fresh input block per chunk
+// plus a 4 KiB output block, encodes, writes, and never frees anything:
+// in auto mode the collector reclaims each chunk once the next one is in
+// flight. The same program in manual mode exhausts the bump arena.
+//
+// Equivalent to: base64 -w0
+
+data:
+alpha: str "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+code:
+main:
+.next:
+    call read_chunk             // r0 = bytes (0..3072, -1 on error), r1 = block
+    jump.eq r0, 0, .done
+    jump.lt r0, 0, .done
+    copy r2, r0
+    call encode_chunk           // r1 = in block, r2 = n
+    jump .next
+.done:
+    set r0, 0
+    exit
+
+// read up to 3072 bytes (filling across short reads) into a fresh block
+read_chunk:
+    enter 8
+    alloc r1, 3072              // managed input block
+    copy r7, r1                 // keep the base (sys 4 wants buf in r1)
+    set r5, 0                   // total read
+    set r6, 3072                // capacity
+.fill:
+    add r1, r7, r5              // buf = base + total
+    sub r2, r6, r5              // remaining
+    set r0, 0                   // stdin
+    sys 4                       // r0 = bytes read (0 on EOF, -1 on error)
+    jump.lt r0, 0, .err
+    jump.eq r0, 0, .ret
+    add r5, r5, r0
+    jump.lt r5, r6, .fill
+.ret:
+    copy r1, r7                 // block base back into r1
+    copy r0, r5
+    leave
+    return
+.err:
+    set r5, -1
+    jump .ret
+
+// encode n bytes from r1 into a fresh 4 KiB output block, write to stdout
+encode_chunk:
+    enter 32
+    store [fp-8], r1
+    store [fp-16], r2
+    alloc r13, 4096             // managed output block
+    load r8, [fp-8]             // in ptr
+    load r10, [fp-16]           // n
+    add r10, r8, r10            // in end
+    copy r9, r13                // out ptr
+    set r11, alpha
+.loop:
+    jump.hs r8, r10, .write
+    load.byte r3, [r8]          // b0
+    inc r8
+    shr r4, r3, 2               // c0 = b0 >> 2
+    add r6, r11, r4
+    load.byte r5, [r6]
+    store.byte [r9], r5
+    inc r9
+    jump.hs r8, r10, .one       // 1 byte left
+    load.byte r4, [r8]          // b1
+    inc r8
+    and r5, r3, 3               // c1 = ((b0 & 3) << 4) | (b1 >> 4)
+    shl r5, r5, 4
+    shr r6, r4, 4
+    or r5, r5, r6
+    add r6, r11, r5
+    load.byte r7, [r6]
+    store.byte [r9], r7
+    inc r9
+    jump.hs r8, r10, .two       // 2 bytes: no b2
+    load.byte r5, [r8]          // b2
+    inc r8
+    and r6, r4, 15              // c2 = ((b1 & 15) << 2) | (b2 >> 6)
+    shl r6, r6, 2
+    shr r7, r5, 6
+    or r6, r6, r7
+    add r6, r11, r6
+    load.byte r7, [r6]
+    store.byte [r9], r7
+    inc r9
+    and r6, r5, 63              // c3 = b2 & 63
+    add r6, r11, r6
+    load.byte r7, [r6]
+    store.byte [r9], r7
+    inc r9
+    jump .loop
+.one:
+    and r5, r3, 3               // c1 = (b0 & 3) << 4
+    shl r5, r5, 4
+    add r6, r11, r5
+    load.byte r7, [r6]
+    store.byte [r9], r7
+    inc r9
+    set r5, 61                  // '='
+    store.byte [r9], r5
+    inc r9
+    store.byte [r9], r5
+    inc r9
+    jump .write
+.two:
+    and r6, r4, 15              // c2 = (b1 & 15) << 2
+    shl r6, r6, 2
+    add r6, r11, r6
+    load.byte r7, [r6]
+    store.byte [r9], r7
+    inc r9
+    set r5, 61                  // '='
+    store.byte [r9], r5
+    inc r9
+.write:
+    sub r2, r9, r13             // out length
+    set r0, 1                   // stdout
+    copy r1, r13
+    sys 5
+    leave
+    return

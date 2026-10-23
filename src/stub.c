@@ -17,6 +17,10 @@
  * Exit codes: 127 ("command not found" style) when the trailer is missing
  * or malformed — e.g. running build/stub.elf before it was fused — and the
  * usual flint convention otherwise: r0 at HLT, or -FLINT_ERR_* on a trap.
+ *
+ * Environment: FLINT_GC_STRESS=1 collects before every allocation;
+ * FLINT_GC_STATS=1 prints a collector report to stderr after the run
+ * (auto-mode programs; both are ignored by manual-mode payloads).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,8 +109,25 @@ int main(void)
 
     flint_init(&vm, code, code_size, mem, mem_size);
     flint_heap_set(&vm, heap_start, (flint_mem_mode)mem_mode);
+    {
+        const char *e = getenv("FLINT_GC_STRESS");
+        if (e && e[0] && e[0] != '0') flint_gc_set_stress(&vm, 1);
+    }
     flint_cli_sysoff(&vm);
     rc = flint_run(&vm, entry);
+
+    {
+        const char *e = getenv("FLINT_GC_STATS");
+        if (e && e[0] && e[0] != '0') {
+            flint_gc_stats gs;
+            flint_gc_get_stats(&vm, &gs);
+            if (gs.enabled)
+                fprintf(stderr, "stub: gc: collections=%u live=%u free=%u "
+                        "alloc=%u reclaimed=%u\n",
+                        gs.collections, gs.bytes_live, gs.bytes_free,
+                        gs.bytes_alloced, gs.bytes_reclaimed);
+        }
+    }
 
     if (vm.err != FLINT_OK) {
         fprintf(stderr, "stub: runtime: %s\n",

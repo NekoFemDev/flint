@@ -33,9 +33,8 @@ int has_fbc_ext_public(const char *s);     /* .fbc bytecode image    */
 const char *flint_mem_mode_name(flint_mem_mode mode);
 int flint_mem_mode_parse(const char *s, flint_mem_mode *out);
 
-/* single-file front-end. mem is the project memory model; since v0.2.0
- * it is informational — RETURN never rewinds the heap cursor, so an
- * allocation outlives the allocating call in either mode. */
+/* single-file front-end. mem is the project memory model (v0.3.0: the
+ * allocator switch — see flint_mem_mode). */
 int flint_cli_run_file(const char *path, uint32_t stack_extra,
                        const char *include_root, flint_mem_mode mem);
 int flint_cli_check_file(const char *path, const char *include_root);
@@ -43,6 +42,18 @@ int flint_cli_check_file(const char *path, const char *include_root);
 /* bytecode-image front-end (.fbc written by `flint build`): execute the
  * stored code+mem images directly, no assembler at run time */
 int flint_cli_run_image(const char *path);
+
+/* run options (flint run --gc-stats --gc-stress --memory ...).
+ * gc_stress also comes from FLINT_GC_STRESS=1 / gc_stats from
+ * FLINT_GC_STATS=1 when the flags are absent. */
+typedef struct {
+    int gc_stats;              /* print a collector stats line (stderr) */
+    int gc_stress;             /* collect before every allocation       */
+    int memory_given;          /* --memory override present             */
+    flint_mem_mode memory;     /* override for files/dirs (also .fbc)   */
+} flint_run_opts;
+
+int flint_cli_cmd_run_opts(const char *arg, const flint_run_opts *opts);
 
 /* command verbs: arg may be NULL (cwd project) */
 /* scaffold <dir>. mem_given == 0 asks on stdin (Enter = manual). */

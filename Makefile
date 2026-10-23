@@ -1,12 +1,12 @@
 # flint — build script (cargo-style targets, zero dependencies)
 CC      ?= cc
 CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -I include
-SRC       = src/flint_core.c src/flint_asm.c src/flint_cli.c src/flint_img.c
-TESTSRC   = src/flint_core.c src/flint_asm.c
+SRC       = src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c src/flint_img.c
+TESTSRC   = src/flint_core.c src/flint_gc.c src/flint_asm.c
 
 BIN       = build/flint
 STUB      = build/stub.elf
-TESTS     = build/test_core build/test_asm build/test_heap
+TESTS     = build/test_core build/test_asm build/test_heap build/test_gc
 
 all: $(BIN) $(STUB)
 
@@ -36,12 +36,12 @@ $(BIN): $(SRC) src/main.c src/flint_dis.c include/flint.h include/flint_cli.h in
 # never needs flint, sources or a .fbc file at run time.
 STUB_LDFLAGS ?= $(if $(filter libc.a,$(shell $(CC) -print-file-name=libc.a 2>/dev/null)),-static-libgcc,-static)
 
-$(STUB): src/stub.c src/flint_core.c src/flint_asm.c src/flint_cli.c \
+$(STUB): src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
          src/flint_img.c src/flint_dis.c \
          include/flint.h include/flint_cli.h include/flint_img.h include/flint_stub.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(STUB_LDFLAGS) -o $@ \
-	  src/stub.c src/flint_core.c src/flint_asm.c src/flint_cli.c \
+	  src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
 	  src/flint_img.c src/flint_dis.c
 
 build/test_core: tests/test_core.c src/flint_core.c include/flint.h
@@ -52,14 +52,19 @@ build/test_asm: tests/test_asm.c src/flint_core.c src/flint_asm.c include/flint.
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(TESTSRC) tests/test_asm.c -o $@
 
-build/test_heap: tests/test_heap.c src/flint_core.c src/flint_asm.c include/flint.h
+build/test_heap: tests/test_heap.c src/flint_core.c src/flint_gc.c src/flint_asm.c include/flint.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(TESTSRC) tests/test_heap.c -o $@
+
+build/test_gc: tests/test_gc.c src/flint_core.c src/flint_gc.c src/flint_asm.c include/flint.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) $(TESTSRC) tests/test_gc.c -o $@
 
 test: $(TESTS) $(BIN) $(STUB)
 	./build/test_core
 	./build/test_asm
 	./build/test_heap
+	./build/test_gc
 	@./$(BIN) tests/hello.flt  | grep -q "Hello, FLINT!"   \
 	  && ./$(BIN) tests/sum.flt   | grep -q 55            \
 	  && ./$(BIN) tests/fact.flt  | grep -q 720           \
@@ -79,6 +84,7 @@ test: $(TESTS) $(BIN) $(STUB)
 	  && ./target/heap | grep -q "heap ok" \
 	  && ./target/heap | grep -q "mode: manual" \
 	  && echo "stub: hello + heap standalone ELFs run"
+	@sh tests/gc.sh
 
 bench: $(BIN)
 	@sh tests/bench.sh

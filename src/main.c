@@ -3,7 +3,7 @@
  *   flint new <dir> [--memory auto|manual]   scaffold a project
  *   flint build <file.flt|dir> [-o out] [--elf]  build .fbc / standalone ELF
  *   flint run <file.flt|file.fbc>   run source, or a built image
- *   flint run [dir]        run a project (default: cwd)
+ *   flint run [dir] [--gc-stats] [--gc-stress] [--memory auto|manual]
  *   flint check <file.flt|file.fbc> assemble/validate without running
  *   flint check [dir]      check a project (default: cwd)
  *   flint dis <file.flt|file.fbc>   print bytecode disassembly
@@ -24,13 +24,18 @@ static void usage(FILE *o)
         "                                  image, or a standalone ELF\n"
         "  flint run <file.flt|file.fbc>   run source, or a built image\n"
         "  flint run [dir]        run a project (default: cwd)\n"
+        "           [--gc-stats] [--gc-stress] [--memory auto|manual]\n"
         "  flint check <file.flt|file.fbc> assemble/validate without running\n"
         "  flint check [dir]      check a project (default: cwd)\n"
         "  flint dis <file.flt|file.fbc>   print bytecode disassembly\n"
         "  flint --version\n"
         "\n"
-        "memory model: manual (`alloc`) or auto (`enter`/`leave` frames);\n"
-        "`flint new` asks on stdin when --memory is omitted.\n"
+        "memory model: manual (`alloc` = bump arena; `free` a no-op) or auto\n"
+        "(`alloc` = collector-managed block; unreachable blocks — cycles\n"
+        "included — are reclaimed). `flint new` asks on stdin when\n"
+        "--memory is omitted. `--gc-stress` collects before every\n"
+        "allocation; `--gc-stats` prints a collector report to stderr;\n"
+        "FLINT_GC_STRESS=1 / FLINT_GC_STATS=1 do the same via the env.\n"
         "`flint build` resolves includes into one self-contained .fbc image;\n"
         "`flint run img.fbc` executes it directly (no assembler).\n"
         "`flint build --elf` fuses build/stub.elf with the program into\n"
@@ -111,6 +116,48 @@ static int cmd_build_args(int argc, char **argv)
     return flint_cli_cmd_build(in, out, elf);
 }
 
+/* flint run [file|dir] [--gc-stats] [--gc-stress] [--memory auto|manual] */
+static int cmd_run_args(int argc, char **argv)
+{
+    flint_run_opts o;
+    const char *arg = 0;
+    int i;
+
+    o.gc_stats = 0; o.gc_stress = 0;
+    o.memory_given = 0; o.memory = FLINT_MEM_MANUAL;
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--gc-stats") == 0) {
+            o.gc_stats = 1;
+        } else if (strcmp(argv[i], "--gc-stress") == 0) {
+            o.gc_stress = 1;
+        } else if (strcmp(argv[i], "--memory") == 0) {
+            if (i + 1 >= argc ||
+                flint_mem_mode_parse(argv[i + 1], &o.memory) != 0) {
+                fprintf(stderr, "flint run: --memory wants auto or manual\n");
+                return 2;
+            }
+            i++;
+            o.memory_given = 1;
+        } else if (strncmp(argv[i], "--memory=", 9) == 0) {
+            if (flint_mem_mode_parse(argv[i] + 9, &o.memory) != 0) {
+                fprintf(stderr, "flint run: --memory wants auto or manual\n");
+                return 2;
+            }
+            o.memory_given = 1;
+        } else if (argv[i][0] == '-' && argv[i][1] != 0) {
+            fprintf(stderr, "flint run: unknown option %s\n", argv[i]);
+            return 2;
+        } else if (arg == 0) {
+            arg = argv[i];
+        } else {
+            fprintf(stderr, "flint run: unexpected argument %s\n", argv[i]);
+            return 2;
+        }
+    }
+    return flint_cli_cmd_run_opts(arg, &o);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -132,7 +179,7 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "build") == 0)
         return cmd_build_args(argc - 2, argv + 2);
     if (strcmp(cmd, "run") == 0)
-        return flint_cli_cmd_run(argc >= 3 ? argv[2] : 0);
+        return cmd_run_args(argc - 2, argv + 2);
     if (strcmp(cmd, "check") == 0)
         return flint_cli_cmd_check(argc >= 3 ? argv[2] : 0);
     if (strcmp(cmd, "dis") == 0)

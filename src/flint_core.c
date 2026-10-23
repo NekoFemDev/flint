@@ -114,9 +114,9 @@ static flint_word wa_mod(flint_vm *vm, flint_word a, flint_word b)
 
 /* indexed by the public FLINT_ERR_* values (flint.h / README):
  * 1 NOSYS, 2 BADPC, 3 BADOP, 4 BADREG, 5 BADMEM, 6 STACK, 7 DIV0,
- * 8 LIMIT, 9 INIT. Designated initialisers keep the table glued to the
- * enum even if a code is inserted later. */
-static const char *const err_names[FLINT_ERR_INIT + 1] = {
+ * 8 LIMIT, 9 INIT, 10 OOM. Designated initialisers keep the table glued
+ * to the enum even if a code is inserted later. */
+static const char *const err_names[FLINT_ERR_OOM + 1] = {
     [FLINT_OK]         = "ok",
     [FLINT_ERR_NOSYS]  = "no syscall on that slot",
     [FLINT_ERR_BADPC]  = "pc out of bounds",
@@ -126,20 +126,25 @@ static const char *const err_names[FLINT_ERR_INIT + 1] = {
     [FLINT_ERR_STACK]  = "stack violation",
     [FLINT_ERR_DIV0]   = "division by zero",
     [FLINT_ERR_LIMIT]  = "step limit",
-    [FLINT_ERR_INIT]   = "bad init arguments"
+    [FLINT_ERR_INIT]   = "bad init arguments",
+    [FLINT_ERR_OOM]    = "managed heap exhausted"
 };
 
 static void set_err(flint_vm *vm)
 {
-    if (vm->err >= 0 && vm->err <= FLINT_ERR_INIT)
-        vm->err_text = err_names[vm->err];
-    else
-        vm->err_text = "unknown error";
+    /* first description wins: the table fills a fresh err_text, while the
+     * collector's more specific corruption message survives the trap */
+    if (vm->err_text == 0) {
+        if (vm->err >= 0 && vm->err <= FLINT_ERR_OOM)
+            vm->err_text = err_names[vm->err];
+        else
+            vm->err_text = "unknown error";
+    }
 }
 
 const char *flint_errno(int err)
 {
-    if (err >= 0 && err <= FLINT_ERR_INIT) return err_names[err];
+    if (err >= 0 && err <= FLINT_ERR_OOM) return err_names[err];
     return "unknown error";
 }
 
@@ -161,6 +166,10 @@ void flint_init(flint_vm *vm,
     vm->steps = 0;      vm->max_steps = 0;
     vm->halted = 0;
     vm->err = FLINT_OK; vm->err_text = 0;
+    {   /* collector state starts zeroed; flint_heap_set arms auto mode */
+        unsigned char *gz = (unsigned char *)&vm->gc;
+        for (i = 0; i < sizeof vm->gc; i++) gz[i] = 0;
+    }
     if ((!vm->code || !vm->code_size) || (!vm->mem || !vm->mem_size)) {
         vm->err = FLINT_ERR_INIT;
         set_err(vm);
@@ -183,6 +192,10 @@ void flint_heap_set(flint_vm *vm, uint32_t heap_start, flint_mem_mode mode)
     vm->heap_ptr   = heap_start;
     /* normalize: the field always holds a valid mode */
     vm->mem_mode = (mode == FLINT_MEM_AUTO) ? FLINT_MEM_AUTO : FLINT_MEM_MANUAL;
+    if (vm->mem_mode == FLINT_MEM_AUTO)
+        flint_gc_init(vm);      /* align the base, zero the scratch area */
+    else
+        vm->gc.enabled = 0;
 }
 
 int flint_step(flint_vm *vm)
@@ -415,6 +428,12 @@ int flint_step(flint_vm *vm)
         if (!stk_push(vm, vm->fp)) break;
         vm->fp = (flint_word)vm->sp;
         vm->sp -= (uint32_t)sz;
+        /* auto mode: zero the fresh locals so stale words cannot act as
+         * conservative roots (manual keeps its historical behavior) */
+        if (vm->mem_mode == FLINT_MEM_AUTO) {
+            uint32_t z;
+            for (z = vm->sp; z < (uint32_t)vm->fp; z++) vm->mem[z] = 0;
+        }
         break;
     }
 
@@ -448,9 +467,23 @@ int flint_step(flint_vm *vm)
         flint_word sz;
         if (!rd_u8(vm, &pc, &rd) || !chk_reg(vm, rd)) break;
         if (!rd_i64(vm, &pc, &sz)) break;
-        /* bounds: the block must fit between the heap cursor and the
-         * stack pointer — mem_size alone would let the up-growing heap
-         * silently overwrite live stack frames (the stack grows down) */
+        if (vm->mem_mode == FLINT_MEM_AUTO) {
+            /* managed allocation: a collector-owned block payload,
+             * zeroed; runs GC on threshold / failure, OOM if still no
+             * space (FLINT_ERR_OOM) */
+            if (sz < 0 || (uint64_t)sz > (uint64_t)vm->mem_size) {
+                vm->err = (sz < 0) ? FLINT_ERR_BADMEM : FLINT_ERR_OOM;
+                break;
+            }
+            t = flint_gc_alloc(vm, (uint32_t)sz);
+            if (!t) break;                       /* trap set inside */
+            vm->r[rd] = t;
+            break;
+        }
+        /* manual: the original bump allocator. bounds: the block must
+         * fit between the heap cursor and the stack pointer — mem_size
+         * alone would let the up-growing heap silently overwrite live
+         * stack frames (the stack grows down) */
         if (sz < 0 || (uint64_t)vm->heap_ptr + (uint64_t)sz > (uint64_t)vm->sp) {
             vm->err = FLINT_ERR_BADMEM; break;
         }
@@ -461,8 +494,14 @@ int flint_step(flint_vm *vm)
 
     case OP_FREE:
         if (!rd_u8(vm, &pc, &ra) || !chk_reg(vm, ra)) break;
-        /* deliberate no-op: reclaim needs per-block size metadata.
-         * The operand is validated so malformed bytecode still traps. */
+        /* deliberate no-op in both modes: manual has no size metadata to
+         * reclaim by; auto lifetime belongs to the collector (hosts may
+         * use flint_gc_free for an explicit, validated release). The
+         * operand is validated so malformed bytecode still traps. */
+        break;
+
+    case OP_GC:
+        if (vm->mem_mode == FLINT_MEM_AUTO) flint_gc_collect(vm);
         break;
 
     default:

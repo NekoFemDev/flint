@@ -1,12 +1,17 @@
 /*
- * test_heap.c — bump-allocator bench (v0.2.0 semantics).
+ * test_heap.c — allocator bench: manual bump arena vs auto collector.
  *
- * OP_ALLOC bumps a cursor from the aligned end of the data image;
- * OP_FREE validates its operand and does nothing. Since v0.2.0 a RET
- * never rewinds the cursor: an allocation made by a callee remains
- * valid after the caller regains control, so returning an array is
- * safe. flint_mem_mode (manual/auto) is informational and both modes
- * must now behave identically (persistent).
+ * Manual: OP_ALLOC bumps a cursor from the aligned end of the data
+ * image; OP_FREE validates its operand and does nothing; a RET never
+ * rewinds the cursor, so a callee's block stays valid (returning an
+ * array is safe).
+ *
+ * Auto (v0.3.0): OP_ALLOC returns the payload of a collector-managed
+ * block — a 16-byte header first, payload zeroed — and the mark-sweep
+ * collector owns lifetime. The assertions below pin the arithmetic
+ * while nothing is unreachable yet and no collection is forced, so the
+ * blocks simply march up from the heap base like a bump arena shifted
+ * by the per-block header.
  */
 #include <stdio.h>
 #include <string.h>
@@ -63,9 +68,9 @@ static void t_basic(void)
 
     rmode(S_basic, FLINT_MEM_AUTO, &vm, &rc);
     CHECK(vm.err == FLINT_OK, "auto: run clean");
-    CHECK(vm.r[2] == base,                         "auto: first alloc at heap_start");
-    CHECK(rc == base + 32 + 16,                    "auto: helper's block persists");
-    CHECK(vm.heap_ptr == base + 32 + 16 + 32,      "auto: RET never rewinds");
+    CHECK(vm.r[2] == base + 16,                 "auto: first payload after header");
+    CHECK(rc == base + 96,                      "auto: callee block counted (no GC yet)");
+    CHECK(vm.heap_ptr == base + 128,            "auto: frontier after three blocks");
 }
 
 static const char *S_nested =
@@ -96,8 +101,8 @@ static void t_nested(void)
 
     rmode(S_nested, FLINT_MEM_AUTO, &vm, &rc);
     CHECK(vm.err == FLINT_OK, "auto nested: run clean");
-    CHECK(rc == base + 32 + 8 + 8 && vm.heap_ptr == base + 80,
-          "auto nested: both callee blocks persist");
+    CHECK(rc == base + 112 && vm.heap_ptr == base + 144,
+          "auto nested: f and g blocks honored until a collection runs");
 }
 
 static const char *S_ret_array =
@@ -132,10 +137,16 @@ static void t_trap(void)
     flint_vm vm; flint_word rc;
 
     rmode("code:\nmain:\n    alloc r0, 1000000\n    exit\n", FLINT_MEM_MANUAL, &vm, &rc);
-    CHECK(vm.err == FLINT_ERR_BADMEM, "alloc past the stack pointer traps");
+    CHECK(vm.err == FLINT_ERR_BADMEM, "manual: alloc past the stack pointer traps");
 
     rmode("code:\nmain:\n    alloc r0, -8\n    exit\n", FLINT_MEM_MANUAL, &vm, &rc);
-    CHECK(vm.err == FLINT_ERR_BADMEM, "negative alloc size traps");
+    CHECK(vm.err == FLINT_ERR_BADMEM, "manual: negative alloc size traps");
+
+    rmode("code:\nmain:\n    alloc r0, 1000000\n    exit\n", FLINT_MEM_AUTO, &vm, &rc);
+    CHECK(vm.err == FLINT_ERR_OOM, "auto: alloc beyond memory traps OOM");
+
+    rmode("code:\nmain:\n    alloc r0, -8\n    exit\n", FLINT_MEM_AUTO, &vm, &rc);
+    CHECK(vm.err == FLINT_ERR_BADMEM, "auto: negative alloc size traps");
 }
 
 static void t_badfree(void)
@@ -148,6 +159,11 @@ static void t_badfree(void)
     flint_heap_set(&vm, 16, FLINT_MEM_MANUAL);
     flint_run(&vm, 0);
     CHECK(vm.err == FLINT_ERR_BADREG, "free r16 (hand-encoded) traps BADREG");
+
+    flint_init(&vm, code, sizeof code, mem, sizeof mem);
+    flint_heap_set(&vm, 16, FLINT_MEM_AUTO);
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_ERR_BADREG, "auto: free r16 still traps BADREG");
 }
 
 int main(void)

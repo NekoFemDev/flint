@@ -265,24 +265,57 @@ static char *inc_load(void *ud, const char *name, const char *from_dir,
     return 0;
 }
 
+/* stderr report for --gc-stats / FLINT_GC_STATS=1 */
+static void print_gc_stats(const flint_vm *vm)
+{
+    flint_gc_stats gs;
+    flint_gc_get_stats(vm, &gs);
+    if (!gs.enabled) {
+        fprintf(stderr, "flint: gc: manual mode (no collector)\n");
+        return;
+    }
+    fprintf(stderr,
+            "flint: gc: collections=%u live=%u free=%u alloc=%u "
+            "reclaimed=%u threshold=%u%s\n",
+            gs.collections, gs.bytes_live, gs.bytes_free, gs.bytes_alloced,
+            gs.bytes_reclaimed, gs.threshold, gs.stress ? " stress" : "");
+    if (gs.overflow_rescans)
+        fprintf(stderr, "flint: gc: overflow rescans=%u\n",
+                gs.overflow_rescans);
+}
+
 /* init + run an assembled image; exit code = r0 at HLT, or -(ERR) on
  * trap. Does not free p — the caller owns the images. */
-static int run_prog(flint_prog *p, flint_mem_mode mem)
+static int run_prog(flint_prog *p, flint_mem_mode mem,
+                    const flint_run_opts *o)
 {
     flint_vm vm;
+    int stress = o && o->gc_stress;
+    int stats  = o && o->gc_stats;
+    const char *e;
+    flint_word rc;
+
+    e = getenv("FLINT_GC_STRESS");
+    if (!stress && e && e[0] && e[0] != '0') stress = 1;
+    e = getenv("FLINT_GC_STATS");
+    if (!stats && e && e[0] && e[0] != '0') stats = 1;
+
     flint_init(&vm, p->code, p->code_size, p->mem, p->mem_size);
     flint_heap_set(&vm, p->heap_start, mem);
+    if (stress) flint_gc_set_stress(&vm, 1);
     flint_cli_sysoff(&vm);
-    flint_word rc = flint_run(&vm, p->entry);
+    rc = flint_run(&vm, p->entry);
 
+    if (stats) print_gc_stats(&vm);
     if (vm.err == FLINT_OK) return (int)(rc & 0x7FFFFFFF);
     fprintf(stderr, "flint: runtime: %s\n", vm.err_text);
     return (int)(-(int64_t)vm.err);
 }
 
 /* assemble one source file (includes resolved by the host) and run it */
-int flint_cli_run_file(const char *path, uint32_t stack_extra,
-                       const char *include_root, flint_mem_mode mem)
+static int run_file_opts(const char *path, uint32_t stack_extra,
+                         const char *include_root, flint_mem_mode mem,
+                         const flint_run_opts *o)
 {
     long len;
     char *src = read_whole(path, &len);
@@ -303,13 +336,19 @@ int flint_cli_run_file(const char *path, uint32_t stack_extra,
     free(src);
     inc_ctx_free(&ic);
 
-    int code = run_prog(&p, mem);
+    int code = run_prog(&p, mem, o);
     flint_prog_free(&p);
     return code;
 }
 
+int flint_cli_run_file(const char *path, uint32_t stack_extra,
+                       const char *include_root, flint_mem_mode mem)
+{
+    return run_file_opts(path, stack_extra, include_root, mem, 0);
+}
+
 /* load a built .fbc image and run it — no assembler involved */
-int flint_cli_run_image(const char *path)
+static int run_image_opts(const char *path, const flint_run_opts *o)
 {
     flint_prog p; flint_mem_mode mem = FLINT_MEM_MANUAL; char err[384] = "";
 
@@ -317,9 +356,15 @@ int flint_cli_run_image(const char *path)
         fprintf(stderr, "flint: %s\n", err);
         return 2;
     }
-    int code = run_prog(&p, mem);
+    if (o && o->memory_given) mem = o->memory;
+    int code = run_prog(&p, mem, o);
     flint_prog_free(&p);
     return code;
+}
+
+int flint_cli_run_image(const char *path)
+{
+    return run_image_opts(path, 0);
 }
 
 int flint_cli_check_file(const char *path,
@@ -516,12 +561,15 @@ static int is_flint_file(const char *s) { return has_flint_ext(s) ||
 int has_flint_ext_public(const char *s) { return has_flint_ext(s); }
 int has_fbc_ext_public(const char *s)   { return has_fbc_ext(s); }
 
-int flint_cli_cmd_run(const char *arg)
+int flint_cli_cmd_run_opts(const char *arg, const flint_run_opts *o)
 {
     if (arg != 0 && has_fbc_ext(arg))
-        return flint_cli_run_image(arg);
-    if (arg != 0 && has_flint_ext(arg))
-        return flint_cli_run_file(arg, 65536, 0, FLINT_MEM_MANUAL);
+        return run_image_opts(arg, o);
+    if (arg != 0 && has_flint_ext(arg)) {
+        flint_mem_mode mem = FLINT_MEM_MANUAL;
+        if (o && o->memory_given) mem = o->memory;
+        return run_file_opts(arg, 65536, 0, mem, o);
+    }
 
     const char *root = arg ? arg : ".";
     char entry[600], err[256];
@@ -532,7 +580,13 @@ int flint_cli_cmd_run(const char *arg)
         fprintf(stderr, "flint: %s\n", err);
         return 2;
     }
-    return flint_cli_run_file(entry, stack, root, mem);
+    if (o && o->memory_given) mem = o->memory;
+    return run_file_opts(entry, stack, root, mem, o);
+}
+
+int flint_cli_cmd_run(const char *arg)
+{
+    return flint_cli_cmd_run_opts(arg, 0);
 }
 
 int flint_cli_cmd_check(const char *arg)
@@ -905,8 +959,11 @@ static const char *NEW_MAIN_MANUAL =
 static const char *NEW_MAIN_AUTO =
     "// %s — FLINT starter project (memory = \"auto\")\n"
     "//\n"
-    "// Automatic memory: locals live in `enter`/`leave` frames — the\n"
-    "// frame is reserved on entry and released on `leave`.\n"
+    "// Automatic memory: `alloc` blocks are owned by the mark-sweep\n"
+    "// collector — a block stays valid while any register, stack slot or\n"
+    "// global reaches it, and unreachable blocks (cycles included) are\n"
+    "// reclaimed automatically. `free` is not needed; `enter`/`leave`\n"
+    "// still build the local frame.\n"
     "\n"
     "data:\n"
     "msg: str \"hello, world\", 10, 0\n"
