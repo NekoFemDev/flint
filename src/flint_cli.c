@@ -16,6 +16,7 @@
 #include "flint.h"
 #include "flint_cli.h"
 #include "flint_img.h"
+#include "flint_stub.h"
 
 /* ---------------- standard syscalls ---------------- */
 
@@ -646,15 +647,112 @@ static void source_stem(const char *path, char *out, size_t cap)
 
 /* ---------------- `flint build` ---------------- */
 
+/* `--elf` drops the fused standalone executable in target/ (same
+ * "relative to the cwd" convention as build/); the stub it copies comes
+ * from build/stub.elf — see include/flint_stub.h for the fused layout */
+#define ELF_OUTPUT_DIR "target"
+
+/* little-endian u32 encode (trailer file format; flint_stub.h) */
+static void elf_put_u32(unsigned char *p, uint32_t v)
+{
+    p[0] = (unsigned char)(v);
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
+
+/* append a whole file to an open writer; 0 = ok, -1 with err set */
+static int append_file(FILE *out, const char *path, char *err, uint32_t errsz)
+{
+    unsigned char buf[65536];
+    FILE *in = fopen(path, "rb");
+    size_t n;
+
+    if (!in) {
+        snprintf(err, errsz, "%s: cannot read (%s)", path, strerror(errno));
+        return -1;
+    }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            snprintf(err, errsz, "write failed");
+            fclose(in);
+            return -1;
+        }
+    }
+    if (ferror(in)) {
+        snprintf(err, errsz, "%s: read failed", path);
+        fclose(in);
+        return -1;
+    }
+    fclose(in);
+    return 0;
+}
+
+/* fuse build/stub.elf + code + mem + trailer into `out`, then chmod it
+ * executable; 0 = ok, -1 with err set (partial output removed) */
+static int build_elf(const char *out, const flint_prog *p, flint_mem_mode mem,
+                     char *err, uint32_t errsz)
+{
+    unsigned char tr[sizeof(struct FlintPayload)];
+    FILE *f;
+    int ok = 1;
+
+    f = fopen(out, "wb");
+    if (!f) {
+        snprintf(err, errsz, "%s: cannot write (%s)", out, strerror(errno));
+        return -1;
+    }
+
+    if (append_file(f, FLINT_STUB_PATH, err, errsz) != 0) ok = 0;
+    if (ok && fwrite(p->code, 1, p->code_size, f) != p->code_size) {
+        snprintf(err, errsz, "%s: write failed", out);
+        ok = 0;
+    }
+    if (ok && fwrite(p->mem, 1, p->mem_size, f) != p->mem_size) {
+        snprintf(err, errsz, "%s: write failed", out);
+        ok = 0;
+    }
+    if (ok) {
+        elf_put_u32(tr + 0,  FLINT_PAYLOAD_MAGIC);
+        elf_put_u32(tr + 4,  p->code_size);
+        elf_put_u32(tr + 8,  p->mem_size);
+        elf_put_u32(tr + 12, p->entry);
+        elf_put_u32(tr + 16, p->heap_start);
+        elf_put_u32(tr + 20, (uint32_t)mem);
+        if (fwrite(tr, 1, sizeof tr, f) != sizeof tr) {
+            snprintf(err, errsz, "%s: write failed", out);
+            ok = 0;
+        }
+    }
+    if (fclose(f) != 0) {
+        if (ok) snprintf(err, errsz, "%s: write failed", out);
+        ok = 0;
+    }
+    if (ok && chmod(out, 0755) != 0) {
+        snprintf(err, errsz, "%s: cannot chmod 0755 (%s)", out,
+                 strerror(errno));
+        ok = 0;
+    }
+
+    if (!ok) {
+        remove(out);                 /* no half-written executables */
+        return -1;
+    }
+    return 0;
+}
+
 /* assemble <file.flt|dir> into one self-contained .fbc image; includes
- * are resolved here, so the image needs no sources at run time */
-int flint_cli_cmd_build(const char *arg, const char *outarg)
+ * are resolved here, so the image needs no sources at run time. With
+ * elf != 0 the output is build/stub.elf fused with the program instead:
+ * one executable, no flint host needed at run time. */
+int flint_cli_cmd_build(const char *arg, const char *outarg, int elf)
 {
     int from_file = (arg != 0 && is_flint_file(arg));
     const char *root = arg ? arg : ".";
     char src_path[600], name[128], out[700];
     uint32_t stack = 65536;
     flint_mem_mode mem = FLINT_MEM_MANUAL;
+    struct stat st;
 
     if (arg != 0 && has_fbc_ext(arg)) {
         fprintf(stderr, "flint build: %s is already a bytecode image\n", arg);
@@ -706,8 +804,29 @@ int flint_cli_cmd_build(const char *arg, const char *outarg)
         return 1;
     }
 
+    /* the --elf stub must have been built first (Makefile: build/stub.elf);
+     * checked before target/ is created so a failed build leaves nothing */
+    if (elf && stat(FLINT_STUB_PATH, &st) != 0) {
+        fprintf(stderr, "flint build: %s missing, run make\n", FLINT_STUB_PATH);
+        flint_prog_free(&p);
+        return 2;
+    }
+
     if (outarg != 0) {
         if (snprintf(out, sizeof out, "%s", outarg) >= (int)sizeof out) {
+            fprintf(stderr, "flint build: output path too long\n");
+            flint_prog_free(&p);
+            return 2;
+        }
+    } else if (elf) {
+        if (mkdir(ELF_OUTPUT_DIR, 0777) != 0 && errno != EEXIST) {
+            fprintf(stderr, "flint build: cannot create %s/: %s\n",
+                    ELF_OUTPUT_DIR, strerror(errno));
+            flint_prog_free(&p);
+            return 2;
+        }
+        if (snprintf(out, sizeof out, ELF_OUTPUT_DIR "/%.100s", name) >=
+            (int)sizeof out) {
             fprintf(stderr, "flint build: output path too long\n");
             flint_prog_free(&p);
             return 2;
@@ -725,6 +844,17 @@ int flint_cli_cmd_build(const char *arg, const char *outarg)
             flint_prog_free(&p);
             return 2;
         }
+    }
+
+    if (elf) {
+        if (build_elf(out, &p, mem, err, sizeof err) != 0) {
+            fprintf(stderr, "flint: %s\n", err);
+            flint_prog_free(&p);
+            return 2;
+        }
+        printf("[OK] Standalone ELF: %s\n", out);
+        flint_prog_free(&p);
+        return 0;
     }
 
     if (flint_img_save(out, &p, mem, err, sizeof err) != 0) {

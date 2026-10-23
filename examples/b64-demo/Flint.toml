@@ -1,0 +1,5 @@
+[project]
+name = "b64-demo"
+entry = "src/main.flt"
+stack = 65536
+memory = "manual"

@@ -1,0 +1,88 @@
+// b64.flt — base64 encoder (RFC 4648 alphabet, no line wrapping).
+// Reads raw bytes from stdin, writes base64 to stdout. EOF-safe.
+//
+// Equivalent to: base64 -w0
+
+data:
+alpha: str "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+code:
+main:
+    set r11, alpha
+
+.next:
+    sys 2                       // r0 = b0 or -1
+    jump.eq r0, -1, .done
+    copy r8, r0
+
+    sys 2                       // r0 = b1 or -1
+    jump.eq r0, -1, .one
+    copy r9, r0
+
+    sys 2                       // r0 = b2 or -1
+    jump.eq r0, -1, .two
+    copy r10, r0
+
+    // c0 = b0 >> 2
+    shr r1, r8, 2
+    call emit
+
+    // c1 = ((b0 & 3) << 4) | (b1 >> 4)
+    and r1, r8, 3
+    shl r1, r1, 4
+    shr r2, r9, 4
+    or r1, r1, r2
+    call emit
+
+    // c2 = ((b1 & 15) << 2) | (b2 >> 6)
+    and r1, r9, 15
+    shl r1, r1, 2
+    shr r2, r10, 6
+    or r1, r1, r2
+    call emit
+
+    // c3 = b2 & 63
+    and r1, r10, 63
+    call emit
+    jump .next
+
+.one:
+    // 1 byte: c0, c1, "=="
+    shr r1, r8, 2
+    call emit
+    and r1, r8, 3
+    shl r1, r1, 4
+    call emit
+    set r0, 61                  // '='
+    sys 1
+    set r0, 61
+    sys 1
+    jump .done
+
+.two:
+    // 2 bytes: c0, c1, c2, "="
+    shr r1, r8, 2
+    call emit
+    and r1, r8, 3
+    shl r1, r1, 4
+    shr r2, r9, 4
+    or r1, r1, r2
+    call emit
+    and r1, r9, 15
+    shl r1, r1, 2
+    call emit
+    set r0, 61
+    sys 1
+    jump .done
+
+.done:
+    set r0, 0
+    exit
+
+// emit one base64 char: r1 = 0..63; clobbers r0, r2
+emit:
+    set r2, alpha
+    add r2, r2, r1
+    load.byte r0, [r2]
+    sys 1
+    return

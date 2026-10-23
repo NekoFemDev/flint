@@ -47,8 +47,10 @@ int flint_cli_run_image(const char *path);
 /* command verbs: arg may be NULL (cwd project) */
 /* scaffold <dir>. mem_given == 0 asks on stdin (Enter = manual). */
 int flint_cli_cmd_new(const char *dir, flint_mem_mode mem, int mem_given);
-/* assemble <file.flt|dir> into one .fbc image; out NULL = build/<name>.fbc */
-int flint_cli_cmd_build(const char *arg, const char *out);
+/* assemble <file.flt|dir> into one .fbc image; out NULL = build/<name>.fbc.
+ * elf != 0 instead fuses build/stub.elf + the program into a standalone
+ * executable (out NULL = target/<name>) — see flint_stub.h */
+int flint_cli_cmd_build(const char *arg, const char *out, int elf);
 int flint_cli_cmd_run(const char *arg);   /* .flt file or project dir */
 int flint_cli_cmd_check(const char *arg);
 int flint_cli_cmd_dis(const char *arg);

@@ -1,4 +1,4 @@
-# FLINT 0.2.0-pre.2
+# FLINT 0.2.0-pre.3
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.
@@ -50,7 +50,7 @@ right before `exit`.
 
 ```
 flint new <dir> [--memory auto|manual]   scaffold a project (prompts if omitted)
-flint build <file.flt|dir> [-o out.fbc]  assemble into one .fbc image
+flint build <file.flt|dir> [-o out] [--elf]  build .fbc image / standalone ELF
 flint run <file.flt|file.fbc>            run a source file or a built image
 flint run [dir]                          run a project (default: current directory)
 flint check <file.flt|file.fbc>          assemble/validate without executing
@@ -121,6 +121,29 @@ fields little-endian u32:
 
 Embedding hosts can read/write images with `include/flint_img.h`
 (`flint_img_save` / `flint_img_load`, 0/-1 with an error string).
+
+### Standalone executables (--elf)
+
+`flint build --elf` fuses the stub with the assembled program into one
+executable at `target/<name>` — `-o` picks another path. `make` builds the
+stub first (`build/stub.elf`); a missing stub is a build error:
+
+```
+$ flint build --elf examples/b64-demo
+[OK] Standalone ELF: target/b64-demo
+$ printf 'foobar' | ./target/b64-demo
+Zm9vYmFy
+```
+
+The file is the stub followed by the code and mem images and a fixed
+trailer (`struct FlintPayload` in `include/flint_stub.h`: magic `"FLNT"`,
+code_size, mem_size, entry_pc, heap_start, mem_mode; all little-endian
+u32). At run time the stub re-reads its own file through `/proc/self/exe`,
+loads the images and runs them with the standard syscall table — no flint,
+no sources, no `.fbc` on the target machine. The stub links statically
+where the toolchain ships a static libc (glibc/musl); Termux's bionic has
+none, so it falls back to `-static-libgcc` + the system libc
+(`make STUB_LDFLAGS=...` forces a choice).
 
 ---
 
@@ -493,7 +516,7 @@ const char *txt = vm.err_text;         /* human-readable line */
 ## Building
 
 ```
-make          # build/flint
+make          # build/flint + build/stub.elf (--elf stub)
 make test     # full bench: core + asm + heap + examples
 make bench    # build the bench examples + compare run speeds
 make clean
@@ -526,6 +549,15 @@ examples/bench_sum/      same program as a project (Flint.toml + src/main.flt)
 examples/bench_fact.flt  bench_fact: ok    (recursive fib(33); ~1.0s)
 examples/bench_fact/     project form, fib in lib/fib.flt (bundled by `build`)
 ```
+
+Demo (project form):
+
+```
+examples/b64-demo/       base64 encoder — stdin → stdout, RFC 4648 (≈ `base64 -w0`)
+```
+
+Run the demo: `printf 'foobar' | flint run examples/b64-demo` → `Zm9vYmFy`;
+it also fuses into a standalone ELF (`flint build --elf examples/b64-demo`).
 
 Run one: `flint run tests/sum.flt` — or all of them: `make test`.
 `make bench` builds both examples with `flint build` and compares

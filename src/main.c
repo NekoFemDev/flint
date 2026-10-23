@@ -1,7 +1,7 @@
 /*
  * main.c — flint CLI entry.
  *   flint new <dir> [--memory auto|manual]   scaffold a project
- *   flint build <file.flt|dir> [-o out.fbc]  assemble into one image
+ *   flint build <file.flt|dir> [-o out] [--elf]  build .fbc / standalone ELF
  *   flint run <file.flt|file.fbc>   run source, or a built image
  *   flint run [dir]        run a project (default: cwd)
  *   flint check <file.flt|file.fbc> assemble/validate without running
@@ -20,7 +20,8 @@ static void usage(FILE *o)
         "\n"
         "usage:\n"
         "  flint new <dir> [--memory auto|manual]   scaffold a project\n"
-        "  flint build <file.flt|dir> [-o out.fbc]  build a bytecode image\n"
+        "  flint build <file.flt|dir> [-o out] [--elf]  build a bytecode\n"
+        "                                  image, or a standalone ELF\n"
         "  flint run <file.flt|file.fbc>   run source, or a built image\n"
         "  flint run [dir]        run a project (default: cwd)\n"
         "  flint check <file.flt|file.fbc> assemble/validate without running\n"
@@ -32,6 +33,9 @@ static void usage(FILE *o)
         "`flint new` asks on stdin when --memory is omitted.\n"
         "`flint build` resolves includes into one self-contained .fbc image;\n"
         "`flint run img.fbc` executes it directly (no assembler).\n"
+        "`flint build --elf` fuses build/stub.elf with the program into\n"
+        "target/<name> — one executable that runs without flint installed\n"
+        "(`-o` overrides the path; needs `make` to build the stub first).\n"
         "\n"
         "exit code: r0 at HLT (or negative error code on trap)\n",
         FLINT_VERSION);
@@ -77,11 +81,12 @@ static int cmd_new_args(int argc, char **argv)
     return flint_cli_cmd_new(dir, mem, mem_given);
 }
 
-/* flint build <file.flt|dir> [-o out.fbc] */
+/* flint build <file.flt|dir> [-o out] [--elf] */
 static int cmd_build_args(int argc, char **argv)
 {
     const char *in = 0;
     const char *out = 0;
+    int elf = 0;
     int i;
 
     for (i = 0; i < argc; i++) {
@@ -91,6 +96,8 @@ static int cmd_build_args(int argc, char **argv)
                 return 2;
             }
             out = argv[++i];
+        } else if (strcmp(argv[i], "--elf") == 0) {
+            elf = 1;
         } else if (argv[i][0] == '-' && argv[i][1] != 0) {
             fprintf(stderr, "flint build: unknown option %s\n", argv[i]);
             return 2;
@@ -101,7 +108,7 @@ static int cmd_build_args(int argc, char **argv)
             return 2;
         }
     }
-    return flint_cli_cmd_build(in, out);
+    return flint_cli_cmd_build(in, out, elf);
 }
 
 int main(int argc, char **argv)
