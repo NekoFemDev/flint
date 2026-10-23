@@ -309,7 +309,76 @@ static const char *S_bad_dirc =
 static const char *S_bad_reg =
 "code:\n"
 "main:\n"
-"    copy r9, r0\n"
+"    copy r16, r0\n"
+"    exit\n";
+
+static const char *S_bad_setreg =
+"code:\n"
+"main:\n"
+"    set r3, r1\n"
+"    exit\n";
+
+/* v0.2.0: frame pointer locals + indexed array access + expanded regs */
+static const char *S_frames =
+"code:\n"
+"main:\n"
+"    set r0, 5\n"
+"    set r1, 7\n"
+"    call add2\n"
+"    copy r1, r0\n"
+"    sys 0\n"
+"    exit\n"
+"add2:\n"
+"    enter 16\n"
+"    store [fp-8], r0\n"
+"    store [fp-16], r1\n"
+"    load r0, [fp-8]\n"
+"    load r2, [fp-16]\n"
+"    add r0, r0, r2\n"
+"    leave\n"
+"    return\n";
+
+static const char *S_index =
+"data:\n"
+"arr: int 10, 20, 30, 40\n"
+"code:\n"
+"main:\n"
+"    set r1, arr\n"
+"    set r2, 0\n"
+"    set r0, 0\n"
+"    set r3, 32\n"
+"loop:\n"
+"    jump.ge r2, r3, done\n"
+"    loadx r4, [r1+r2]\n"
+"    add r0, r0, r4\n"
+"    add r2, 8\n"
+"    jump loop\n"
+"done:\n"
+"    copy r1, r0\n"
+"    sys 0\n"
+"    exit\n";
+
+static const char *S_index_store =
+"data:\n"
+"buf: bytes 32\n"
+"code:\n"
+"main:\n"
+"    set r1, buf\n"
+"    set r2, 16\n"
+"    set r3, 77\n"
+"    storx [r1+r2], r3\n"
+"    set r2, 16\n"
+"    load r4, [r1+r2]\n"
+"    copy r0, r4\n"
+"    sys 0\n"
+"    exit\n";
+
+static const char *S_r15 =
+"code:\n"
+"main:\n"
+"    set r15, 909\n"
+"    copy r0, r15\n"
+"    sys 0\n"
 "    exit\n";
 
 /* --- bench --- */
@@ -388,6 +457,11 @@ int main(void)
     if (run_p(S_sugar,  "sugar"))   chk_out("0",    "branch two-operand sugar");
     if (run_p(S_pushi,  "pushi"))   chk_out("42",   "push imm / pop / add");
     if (run_p(S_dataref,"dataref")) chk_out("42",   "set label + load word");
+    if (run_p(S_frames, "frames"))  chk_out("12",   "enter/leave + fp locals");
+    if (run_p(S_index,  "index"))   chk_out("100",  "loadx array sum");
+    if (run_p(S_index_store, "index_store"))
+        chk_out("77", "storx + auto-indexed load");
+    if (run_p(S_r15,    "r15"))     chk_out("909",  "r15 usable");
     if (run_p(S_unsig,  "unsig")) {
         chk_out("42", "unsigned pair lo/hs");
         /* lo must not fire: the "99" marker must never reach stdout */
@@ -478,7 +552,8 @@ int main(void)
     chk_reject(S_bad_nomain,"missing 'main' rejected");
     chk_reject(S_bad_dup,   "duplicate label rejected");
     chk_reject(S_bad_dirc,  "data directive in code rejected");
-    chk_reject(S_bad_reg,   "register r9 rejected");
+    chk_reject(S_bad_reg,   "register r16 rejected");
+    chk_reject(S_bad_setreg, "set reg, reg rejected (use copy)");
 
     printf("fails: %d\n", fails);
     return fails ? 1 : 0;

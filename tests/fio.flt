@@ -1,4 +1,8 @@
-// file I/O round-trip: write "ping\0", close, re-read, verify + EOF + first byte
+// file I/O round-trip with the v0.2.0 host table:
+//   sys 3 open(path, flags)  r0 = path addr, r1 = flags -> r0 = fd
+//   sys 4 read(fd, buf, len) r0 = fd, r1 = buf, r2 = len -> r0 = bytes
+//   sys 5 write(fd, buf, n)  r0 = fd, r1 = buf, r2 = n   -> r0 = bytes
+//   sys 6 close(fd)          r0 = fd                     -> r0 = 0
 // run from the project root (build/ must exist)
 include "stdlib.flt"
 
@@ -9,41 +13,43 @@ buf:  bytes 8
 
 code:
 main:
-    set r1, 1              // mode 1 = write/truncate
-    set r2, path
-    sys 4                  // fopen; r0 = handle (or -1)
+    set r0, path
+    set r1, 1              // flags 1 = write (create/truncate)
+    sys 3                  // open; r0 = fd (or -1)
     copy r4, r0
     jump.lt r4, 0, fail
 
-    copy r1, r4            // handle
-    set r2, msg
-    set r3, 5              // "ping" + NUL
-    sys 7                  // fwrite -> bytes written
+    copy r0, r4            // fd
+    set r1, msg
+    set r2, 5              // "ping" + NUL
+    sys 5                  // write -> bytes written
     jump.ne r0, 5, fail
 
-    copy r1, r4
-    sys 5                  // fclose -> 0
+    copy r0, r4
+    sys 6                  // close -> 0
     jump.ne r0, 0, fail
 
-    set r1, 0              // mode 0 = read
-    set r2, path
-    sys 4
+    set r0, path
+    set r1, 0              // flags 0 = read
+    sys 3
     copy r4, r0
     jump.lt r4, 0, fail
 
-    copy r1, r4
-    set r2, buf
-    set r3, 8              // ask for 8, file has 5
-    sys 6                  // fread -> 5
+    copy r0, r4
+    set r1, buf
+    set r2, 8              // ask for 8, file has 5
+    sys 4                  // read -> 5
     copy r5, r0
     jump.ne r5, 5, fail
 
-    copy r1, r4
-    sys 6                  // again -> EOF, 0
+    copy r0, r4
+    set r1, buf
+    set r2, 8
+    sys 4                  // again -> EOF, 0
     jump.ne r0, 0, fail
 
-    copy r1, r4
-    sys 5
+    copy r0, r4
+    sys 6
     jump.ne r0, 0, fail
 
     set r1, buf

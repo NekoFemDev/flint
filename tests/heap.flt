@@ -1,0 +1,77 @@
+// heap.flt — bump allocator: alloc/free and allocation lifetime.
+//
+// A bump allocator starts at the aligned end of the data section:
+// 'alloc rd, n' returns the block address in rd and moves the cursor up
+// by n; 'free' is a validated no-op. Since v0.2.0 'return' never rewinds
+// the cursor, in either RAM mode: a callee's block stays valid after the
+// caller regains control (returning an array is safe). The old auto /
+// arena mode is gone; Flint.toml use_hand_made_ram_control is accepted
+// for compatibility but no longer changes behaviour.
+//
+// The program checks cursor arithmetic, free-as-no-op, and that a
+// callee allocation persists across the return:
+//   flint run tests/heap.flt -> "heap mode: manual" + "heap ok"
+
+data:
+msg_manual: str "heap mode: manual", 10, 0
+msg_ok:     str "heap ok", 10, 0
+msg_fail:   str "heap FAIL", 10, 0
+
+code:
+
+main:
+    // cursor walks up: block B sits exactly one block after block A
+    alloc r1, 32                // block A
+    alloc r2, 16                // block B
+    sub r3, r2, r1
+    jump.ne r3, 32, fail
+
+    // words are readable and writable through returned pointers
+    set r4, 4242
+    store [r1], r4
+    load r5, [r1]
+    jump.ne r5, r4, fail
+
+    // free is a no-op: the cursor has not moved, so the next block
+    // lands right after B
+    free r2
+    alloc r6, 8
+    sub r7, r6, r2
+    jump.ne r7, 16, fail
+
+    // watermark block, a call whose callee allocates, then one more
+    // alloc after the return: the callee's 16 bytes must still count
+    alloc r3, 32                // watermark block W
+    call helper                 // callee allocs 16 bytes (persists)
+    alloc r7, 16
+    sub r0, r7, r3
+    jump.ne r0, 48, fail        // 32 (W) + 16 (callee)
+
+    set r2, msg_manual
+    call puts
+    set r2, msg_ok
+    call puts
+    set r0, 0
+    exit
+
+fail:
+    set r2, msg_fail
+    call puts
+    set r0, 1
+    exit
+
+helper:
+    alloc r1, 16
+    free r1                     // validated no-op
+    return
+
+// puts: print the NUL-terminated string at r2, one byte via putc (sys 1)
+puts:
+.loop:
+    load.byte r0, [r2]
+    jump.eq r0, 0, .done
+    sys 1
+    inc r2
+    jump .loop
+.done:
+    return

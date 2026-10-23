@@ -4,25 +4,20 @@
 
 #include "flint.h"
 
-/* CLI host syscall table — slot map. Args travel in r1..r3, results in r0.
+/* CLI host syscall table — slot map. Args travel in r0..r2, results in r0.
  *   0  print_str  r1 = addr, r2 = len; raw bytes to stdout; no clobber
  *   1  putc       low byte of r0 -> stdout
  *   2  getc       stdin byte -> r0 (-1 on EOF)
- *   3  read_mem   reserved (debug stub)
- *   4  fopen      r1 = mode (0 read / 1 write / 2 append), r2 = path
- *   5  fclose     r1 = handle
- *   6  fread      r1 = handle, r2 = buf, r3 = max bytes
- *   7  fwrite     r1 = handle, r2 = buf, r3 = bytes
+ *   3  open       r0 = path addr, r1 = flags (0 read / 1 write) -> fd
+ *   4  read       r0 = fd, r1 = buf, r2 = len -> bytes or -1
+ *   5  write      r0 = fd, r1 = buf, r2 = len -> bytes or -1
+ *   6  close      r0 = fd -> 0 or -1
  *   8  time       -> r0 = epoch seconds
- *   9  regs       debug dump r0..r7 (not part of the stable ABI)
- * Slots 0..3 are the generic standard set (flint.h FLINT_SYS_*). */
+ *   9  regs       debug dump r0..r15 (not part of the stable ABI)
+ * Slots 0..6 are the generic standard set (flint.h FLINT_SYS_*). */
 enum {
-    CLI_SYS_FOPEN  = 4,
-    CLI_SYS_FCLOSE = 5,
-    CLI_SYS_FREAD  = 6,
-    CLI_SYS_FWRITE = 7,
-    CLI_SYS_TIME   = 8,
-    CLI_SYS_REGS   = 9
+    CLI_SYS_TIME = 8,
+    CLI_SYS_REGS = 9
 };
 
 void flint_cli_sysoff(flint_vm *vm);
@@ -31,8 +26,10 @@ void flint_cli_sysoff(flint_vm *vm);
 int has_flint_ext_public(const char *s);
 
 /* single-file front-end */
+/* use_manual_ram is retained for compatibility; since v0.2.0 RETURN never
+ * rewinds the heap cursor, so the flag no longer changes allocation lifetime */
 int flint_cli_run_file(const char *path, uint32_t stack_extra,
-                       const char *include_root);
+                       const char *include_root, int use_manual_ram);
 int flint_cli_check_file(const char *path, const char *include_root);
 
 /* command verbs: arg may be NULL (cwd project) */

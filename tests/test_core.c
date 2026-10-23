@@ -46,6 +46,10 @@ static void e_push(int rs)       { e8(OP_PUSH); e8(rs); }
 static void e_pop(int rd)        { e8(OP_POP); e8(rd); }
 static void e_mul(int rd, int ra, int rb) { e8(OP_MUL); e8(rd); e8(ra); e8(rb); }
 static void e_add(int rd, int ra, int rb) { e8(OP_ADD); e8(rd); e8(ra); e8(rb); }
+static void e_enter(flint_word n)        { e8(OP_ENTER); e64(n); }
+static void e_leave(void)                { e8(OP_LEAVE); }
+static void e_loadx(int rd, int rb, int ri) { e8(OP_LOADX); e8(rd); e8(rb); e8(ri); }
+static void e_storx(int rb, int ri, int rs) { e8(OP_STOREX); e8(rb); e8(ri); e8(rs); }
 
 /* ---- host side: sys1 = putc into test buffer ---- */
 
@@ -192,13 +196,85 @@ static void t_badreg(void)
     static flint_byte mem[512];
 
     hasm_reset();
-    e8(OP_SET); e8(9); e64(42);        /* rd = 9 -> illegal */
+    e8(OP_SET); e8(16); e64(42);       /* r0..r15 are legal; 16 is not */
     e_hlt();
 
     memset(mem, 0, sizeof(mem));
     flint_init(&vm, cb, cn, mem, sizeof(mem));
     flint_run(&vm, 0);
-    CHECK(vm.err == FLINT_ERR_BADREG, "register 9 traps");
+    CHECK(vm.err == FLINT_ERR_BADREG, "register 16 traps");
+}
+
+static void t_reg15(void)
+{
+    flint_vm vm;
+    static flint_byte mem[512];
+
+    hasm_reset();
+    e_set(15, 4242);                   /* the expanded register file */
+    e_copy(0, 15);
+    e_hlt();
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_OK && vm.r[0] == 4242, "r15 round-trips");
+}
+
+static void t_frames(void)
+{
+    flint_vm vm;
+    static flint_byte mem[512];
+
+    hasm_reset();
+    e_set(0, 11);
+    e_enter(8);                       /* one local slot at fp-8 */
+    e8(OP_STOREW); e8(16); e8(0); e64(-8);   /* store [fp-8], r0 */
+    e_set(0, 0);
+    e8(OP_LOADW); e8(0); e8(16); e64(-8);    /* load r0, [fp-8] */
+    e_leave();
+    e_hlt();
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_OK && vm.r[0] == 11, "enter/leave + fp local");
+}
+
+static void t_indexed(void)
+{
+    flint_vm vm;
+    static flint_byte mem[512];
+
+    hasm_reset();
+    e_set(1, 16);                     /* base */
+    e_set(2, 8);                      /* index */
+    e_set(3, 77);
+    e_storx(1, 2, 3);                 /* mem[24] = 77 */
+    e_set(3, 0);
+    e_loadx(4, 1, 2);                 /* r4 = mem[24] */
+    e_hlt();
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_OK && vm.r[4] == 77, "loadx/storx base+index");
+}
+
+static void t_enter_overflow(void)
+{
+    flint_vm vm;
+    static flint_byte mem[64];
+
+    hasm_reset();
+    e_enter(1024);                    /* larger than the whole image */
+    e_leave();
+    e_hlt();
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_ERR_STACK, "oversized enter traps STACK");
 }
 
 static void t_unsigned(void)
@@ -237,6 +313,10 @@ int main(void)
     t_badmem();
     t_stack();
     t_badreg();
+    t_reg15();
+    t_frames();
+    t_indexed();
+    t_enter_overflow();
     t_unsigned();
     printf("fails: %d\n", fails);
     return fails ? 1 : 0;

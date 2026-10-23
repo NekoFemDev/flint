@@ -62,7 +62,7 @@ int main(int argc, char **argv)
 
     /* convenience: `flint path/file.flt` == `flint run path/file.flt` */
     if (has_flint_ext_public(cmd))
-        return flint_cli_run_file(cmd, 65536, 0);
+        return flint_cli_run_file(cmd, 65536, 0, 1);
 
     usage(stderr);
     return 2;

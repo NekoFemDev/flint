@@ -33,6 +33,18 @@ static int chk_reg(flint_vm *vm, uint8_t r)
     return 1;
 }
 
+/* address-base operands accept a real register or the fp pseudo-register */
+static int chk_base(flint_vm *vm, uint8_t r)
+{
+    if (r == FLINT_REG_FP) return 1;
+    return chk_reg(vm, r);
+}
+
+static flint_word base_of(const flint_vm *vm, uint8_t r)
+{
+    return (r == FLINT_REG_FP) ? vm->fp : vm->r[r];
+}
+
 /* address helpers: base reg + byte offset against mem_size */
 static int chk_addr(flint_vm *vm, flint_word base, flint_word off, uint32_t n)
 {
@@ -73,7 +85,10 @@ static int stk_push(flint_vm *vm, flint_word v)
 
 static void stk_pop(flint_vm *vm, flint_word *v)
 {
-    if (vm->sp > vm->mem_size - 8) { vm->err = FLINT_ERR_STACK; return; }
+    /* compare in unsigned space so a tiny mem_size cannot wrap the bound */
+    if (vm->sp > vm->mem_size || vm->mem_size - vm->sp < 8) {
+        vm->err = FLINT_ERR_STACK; return;
+    }
     *v = mem_load(vm, vm->sp, 8);
     vm->sp += 8;
 }
@@ -97,16 +112,29 @@ static flint_word wa_mod(flint_vm *vm, flint_word a, flint_word b)
 /* shift amounts are masked to 0..63 — defined behavior, no UB */
 #define SHIFT_MASK 63
 
-static const char *const err_names[] = {
-    "ok", "no syscall on that slot", "pc out of bounds",
-    "unknown opcode", "register out of range", "address out of bounds",
-    "stack violation", "division by zero", "step limit",
-    "bad init arguments"
+/* indexed by the public FLINT_ERR_* values (flint.h / README):
+ * 1 NOSYS, 2 BADPC, 3 BADOP, 4 BADREG, 5 BADMEM, 6 STACK, 7 DIV0,
+ * 8 LIMIT, 9 INIT. Designated initialisers keep the table glued to the
+ * enum even if a code is inserted later. */
+static const char *const err_names[FLINT_ERR_INIT + 1] = {
+    [FLINT_OK]         = "ok",
+    [FLINT_ERR_NOSYS]  = "no syscall on that slot",
+    [FLINT_ERR_BADPC]  = "pc out of bounds",
+    [FLINT_ERR_BADOP]  = "unknown opcode",
+    [FLINT_ERR_BADREG] = "register out of range",
+    [FLINT_ERR_BADMEM] = "address out of bounds",
+    [FLINT_ERR_STACK]  = "stack violation",
+    [FLINT_ERR_DIV0]   = "division by zero",
+    [FLINT_ERR_LIMIT]  = "step limit",
+    [FLINT_ERR_INIT]   = "bad init arguments"
 };
 
 static void set_err(flint_vm *vm)
 {
-    vm->err_text = err_names[vm->err];
+    if (vm->err >= 0 && vm->err <= FLINT_ERR_INIT)
+        vm->err_text = err_names[vm->err];
+    else
+        vm->err_text = "unknown error";
 }
 
 const char *flint_errno(int err)
@@ -127,17 +155,33 @@ void flint_init(flint_vm *vm,
     vm->code = code;    vm->code_size = code_size;
     vm->mem  = mem;     vm->mem_size  = mem_size;
     vm->pc = 0;         vm->sp = mem_size;
+    vm->fp = (flint_word)mem_size;     /* no frame yet */
+    vm->heap_ptr = 0;   vm->heap_start = 0;
+    vm->use_manual_ram = 1;            /* compatibility field (unused) */
     vm->steps = 0;      vm->max_steps = 0;
     vm->halted = 0;
     vm->err = FLINT_OK; vm->err_text = 0;
-    if ((!vm->code || !vm->code_size) || (!vm->mem || !vm->mem_size))
+    if ((!vm->code || !vm->code_size) || (!vm->mem || !vm->mem_size)) {
         vm->err = FLINT_ERR_INIT;
+        set_err(vm);
+    }
 }
 
 void flint_sys_set(flint_vm *vm, int slot, flint_syscall fn)
 {
     if (slot < 0 || slot >= FLINT_MAX_SYS) return;
     vm->sys[slot] = fn;
+}
+
+void flint_heap_set(flint_vm *vm, uint32_t heap_start, int use_manual_ram)
+{
+    /* the host picks the start (the CLI passes the assembler's aligned
+     * data end); a start past the image would only make the first alloc
+     * trap, so clamp instead of storing an impossible cursor */
+    if (heap_start > vm->mem_size) heap_start = vm->mem_size;
+    vm->heap_start     = heap_start;
+    vm->heap_ptr       = heap_start;
+    vm->use_manual_ram = use_manual_ram ? 1 : 0;
 }
 
 int flint_step(flint_vm *vm)
@@ -182,24 +226,55 @@ int flint_step(flint_vm *vm)
     case OP_LOADB:
     case OP_LOADW: {
         uint32_t n = (op == OP_LOADB) ? 1 : 8;
+        flint_word base;
         if (!rd_u8(vm, &pc, &rd) || !chk_reg(vm, rd) ||
-            !rd_u8(vm, &pc, &rb) || !chk_reg(vm, rb) ||
+            !rd_u8(vm, &pc, &rb) || !chk_base(vm, rb) ||
             !rd_i64(vm, &pc, &off)) break;
-        if (!chk_addr(vm, vm->r[rb], off, n)) break;
+        base = base_of(vm, rb);
+        if (!chk_addr(vm, base, off, n)) break;
         vm->r[rd] = mem_load(vm,
-            (uint32_t)((uint64_t)vm->r[rb] + (uint64_t)off), n);
+            (uint32_t)((uint64_t)base + (uint64_t)off), n);
+        break;
+    }
+
+    /* indexed load/store: address = base + index (byte address, no scale) */
+    case OP_LOADX: {
+        flint_word base, idx;
+        if (!rd_u8(vm, &pc, &rd) || !chk_reg(vm, rd) ||
+            !rd_u8(vm, &pc, &rb) || !chk_base(vm, rb) ||
+            !rd_u8(vm, &pc, &ra) || !chk_reg(vm, ra)) break;
+        base = base_of(vm, rb);
+        idx  = vm->r[ra];
+        if (!chk_addr(vm, base, idx, 8)) break;
+        vm->r[rd] = mem_load(vm,
+            (uint32_t)((uint64_t)base + (uint64_t)idx), 8);
         break;
     }
 
     case OP_STOREB:
     case OP_STOREW: {
         uint32_t n = (op == OP_STOREB) ? 1 : 8;
-        if (!rd_u8(vm, &pc, &rb) || !chk_reg(vm, rb) ||
+        flint_word base;
+        if (!rd_u8(vm, &pc, &rb) || !chk_base(vm, rb) ||
             !rd_u8(vm, &pc, &ra) || !chk_reg(vm, ra) ||
             !rd_i64(vm, &pc, &off)) break;
-        if (!chk_addr(vm, vm->r[rb], off, n)) break;
+        base = base_of(vm, rb);
+        if (!chk_addr(vm, base, off, n)) break;
         mem_store(vm,
-            (uint32_t)((uint64_t)vm->r[rb] + (uint64_t)off), n, vm->r[ra]);
+            (uint32_t)((uint64_t)base + (uint64_t)off), n, vm->r[ra]);
+        break;
+    }
+
+    case OP_STOREX: {
+        flint_word base, idx;
+        if (!rd_u8(vm, &pc, &rb) || !chk_base(vm, rb) ||
+            !rd_u8(vm, &pc, &ra) || !chk_reg(vm, ra) ||
+            !rd_u8(vm, &pc, &rd) || !chk_reg(vm, rd)) break;
+        base = base_of(vm, rb);
+        idx  = vm->r[ra];
+        if (!chk_addr(vm, base, idx, 8)) break;
+        mem_store(vm,
+            (uint32_t)((uint64_t)base + (uint64_t)idx), 8, vm->r[rd]);
         break;
     }
 
@@ -312,14 +387,45 @@ int flint_step(flint_vm *vm)
     case OP_CALL:
         if (!rd_i64(vm, &pc, &target)) break;
         if (target < 0 || target > vm->code_size) { vm->err = FLINT_ERR_BADPC; break; }
+        /* v0.2.0 frame: one word, the return pc. Locals live in an
+         * ENTER/LEAVE frame below it; the heap cursor is never rewound. */
         if (!stk_push(vm, (flint_word)pc)) break;
         pc = (uint32_t)target; break;
 
     case OP_RET:
         stk_pop(vm, &t);
         if (vm->err) break;
-        if (t < 0 || (flint_word)t > (flint_word)vm->code_size) { vm->err = FLINT_ERR_BADPC; break; }
-        pc = (uint32_t)t; break;
+        if (t < 0 || t > (flint_word)vm->code_size) { vm->err = FLINT_ERR_BADPC; break; }
+        pc = (uint32_t)t;
+        break;
+
+    /* frame prologue: push old fp, set fp = sp, reserve size bytes.
+     * locals are [fp-size, fp); the first 8-byte slot is at fp-8. */
+    case OP_ENTER: {
+        flint_word sz;
+        if (!rd_i64(vm, &pc, &sz)) break;
+        if (sz < 0 || (uint64_t)sz + 8u > (uint64_t)vm->sp) {
+            vm->err = FLINT_ERR_STACK; break;
+        }
+        /* do not let the frame grow into the bump-allocator arena */
+        if ((uint64_t)vm->sp - 8u - (uint64_t)sz < (uint64_t)vm->heap_ptr) {
+            vm->err = FLINT_ERR_STACK; break;
+        }
+        if (!stk_push(vm, vm->fp)) break;
+        vm->fp = (flint_word)vm->sp;
+        vm->sp -= (uint32_t)sz;
+        break;
+    }
+
+    case OP_LEAVE:
+        if (vm->fp < 0 || (uint64_t)vm->fp > (uint64_t)vm->mem_size) {
+            vm->err = FLINT_ERR_STACK; break;
+        }
+        vm->sp = (uint32_t)vm->fp;
+        stk_pop(vm, &t);
+        if (vm->err) break;
+        vm->fp = t;
+        break;
 
     case OP_PUSH:
         if (!rd_u8(vm, &pc, &ra) || !chk_reg(vm, ra)) break;
@@ -336,6 +442,27 @@ int flint_step(flint_vm *vm)
         stk_pop(vm, &t);
         if (vm->err) break;
         vm->r[rd] = t; break;
+
+    case OP_ALLOC: {
+        flint_word sz;
+        if (!rd_u8(vm, &pc, &rd) || !chk_reg(vm, rd)) break;
+        if (!rd_i64(vm, &pc, &sz)) break;
+        /* bounds: the block must fit between the heap cursor and the
+         * stack pointer — mem_size alone would let the up-growing heap
+         * silently overwrite live stack frames (the stack grows down) */
+        if (sz < 0 || (uint64_t)vm->heap_ptr + (uint64_t)sz > (uint64_t)vm->sp) {
+            vm->err = FLINT_ERR_BADMEM; break;
+        }
+        vm->r[rd] = (flint_word)vm->heap_ptr;
+        vm->heap_ptr += (uint32_t)sz;
+        break;
+    }
+
+    case OP_FREE:
+        if (!rd_u8(vm, &pc, &ra) || !chk_reg(vm, ra)) break;
+        /* deliberate no-op: reclaim needs per-block size metadata.
+         * The operand is validated so malformed bytecode still traps. */
+        break;
 
     default:
         vm->err = FLINT_ERR_BADOP; break;

@@ -7,7 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "flint.h"
@@ -15,7 +18,8 @@
 
 /* ---------------- standard syscalls ---------------- */
 
-static int clif_span(const flint_vm *vm, flint_word addr, flint_word cnt);
+static int  clif_span(const flint_vm *vm, flint_word addr, flint_word cnt);
+static long clif_strn(const flint_vm *vm, flint_word addr);
 
 /* SYS 0 (FLINT_SYS_PRINT_STR): write the raw byte span mem[r1 .. r1+r2).
  * Exactly r2 bytes go out — NULs included — and no register is touched. */
@@ -44,13 +48,24 @@ static void std_getc(flint_vm *vm)
     vm->r[0] = (c == EOF) ? (flint_word)-1 : (flint_word)(unsigned char)c;
 }
 
-/* SYS 3 (FLINT_SYS_READ_MEM): reserved for the debugger layer; stub */
-static void std_read_mem(flint_vm *vm)
+/* SYS 3 (FLINT_SYS_OPEN): r0 = path address in mem, r1 = flags
+ * (0 read / 1 write). Result: r0 = fd or -1. Write mode creates and
+ * truncates; the path must be NUL-terminated inside the memory image. */
+static void std_open(flint_vm *vm)
 {
-    vm->r[0] = -1;                      /* "not implemented" */
+    int oflags, fd;
+
+    if (clif_strn(vm, vm->r[0]) < 0) { vm->r[0] = -1; return; }
+    switch (vm->r[1]) {
+    case 0: oflags = O_RDONLY; break;
+    case 1: oflags = O_WRONLY | O_CREAT | O_TRUNC; break;
+    default: vm->r[0] = -1; return;
+    }
+    fd = open((const char *)(vm->mem + vm->r[0]), oflags, 0644);
+    vm->r[0] = (fd < 0) ? (flint_word)-1 : (flint_word)fd;
 }
 
-/* SYS 9 (CLI_SYS_REGS, debug): dump r0..r7, one per line */
+/* SYS 9 (CLI_SYS_REGS, debug): dump r0..r15, one per line */
 static void std_regs(flint_vm *vm)
 {
     int i;
@@ -58,9 +73,7 @@ static void std_regs(flint_vm *vm)
         printf("r%d = %lld\n", i, (long long)vm->r[i]);
 }
 
-/* ---- file layer: handles are 1-based indexes into a FILE* table ---- */
-#define CLIF_MAX 32
-static FILE *clif_tab[CLIF_MAX];
+/* ---- file layer: POSIX descriptors, args in r0..r2 ---- */
 
 /* NUL-terminated byte string at mem[addr]; returns length or -1 (runs off) */
 static long clif_strn(const flint_vm *vm, flint_word addr)
@@ -80,81 +93,48 @@ static int clif_span(const flint_vm *vm, flint_word addr, flint_word cnt)
     return 1;
 }
 
-/* SYS 4: fopen — r1 = mode (0 read / 1 write / 2 append), r2 = path in mem.
- * result: r0 = handle (1-based) or -1 */
-static void std_fopen(flint_vm *vm)
+/* SYS 4 (FLINT_SYS_READ): r0 = fd, r1 = buffer in mem, r2 = max bytes.
+ * result: r0 = bytes read (0 on EOF) or -1 */
+static void std_read(flint_vm *vm)
 {
-    const char *mode;
-    long plen;
-    FILE *f;
-    int i;
+    flint_word fd = vm->r[0];
+    flint_word off = vm->r[1];
+    flint_word cnt = vm->r[2];
+    ssize_t n;
 
-    switch (vm->r[1]) {
-    case 0:  mode = "rb"; break;
-    case 1:  mode = "wb"; break;
-    case 2:  mode = "ab"; break;
-    default: vm->r[0] = -1; return;
+    if (fd < 0 || fd > INT_MAX || !clif_span(vm, off, cnt)) {
+        vm->r[0] = -1; return;
     }
-    plen = clif_strn(vm, vm->r[2]);
-    if (plen < 0 || plen > 4096) { vm->r[0] = -1; return; }
-
-    {
-        char path[4097];
-        memcpy(path, vm->mem + vm->r[2], (size_t)plen);
-        path[plen] = 0;
-        f = fopen(path, mode);
-    }
-    if (!f) { vm->r[0] = -1; return; }
-    for (i = 0; i < CLIF_MAX; i++) {
-        if (clif_tab[i] == 0) { clif_tab[i] = f; vm->r[0] = i + 1; return; }
-    }
-    fclose(f);
-    vm->r[0] = -1;
+    do {
+        n = read((int)fd, vm->mem + off, (size_t)cnt);
+    } while (n < 0 && errno == EINTR);
+    vm->r[0] = (n < 0) ? (flint_word)-1 : (flint_word)n;
 }
 
-/* SYS 5: fclose — r1 = handle; r0 = 0 or -1 */
-static void std_fclose(flint_vm *vm)
-{
-    flint_word h = vm->r[1];
-    if (h < 1 || h > CLIF_MAX || clif_tab[h - 1] == 0) { vm->r[0] = -1; return; }
-    fclose(clif_tab[h - 1]);
-    clif_tab[h - 1] = 0;
-    vm->r[0] = 0;
-}
-
-/* SYS 6: fread — r1 = handle, r2 = buffer in mem, r3 = max bytes.
- * result: r0 = bytes read, 0 on EOF, -1 on error */
-static void std_fread(flint_vm *vm)
-{
-    FILE *f;
-    flint_word h = vm->r[1];
-    flint_word off = vm->r[2];
-    flint_word cnt = vm->r[3];
-    size_t n;
-
-    if (h < 1 || h > CLIF_MAX || clif_tab[h - 1] == 0) { vm->r[0] = -1; return; }
-    if (!clif_span(vm, off, cnt)) { vm->r[0] = -1; return; }
-    f = clif_tab[h - 1];
-    n = fread(vm->mem + off, 1, (size_t)cnt, f);
-    if (n == 0 && ferror(f)) { vm->r[0] = -1; return; }
-    vm->r[0] = (flint_word)n;
-}
-
-/* SYS 7: fwrite — r1 = handle, r2 = buffer in mem, r3 = bytes.
+/* SYS 5 (FLINT_SYS_WRITE): r0 = fd, r1 = buffer in mem, r2 = bytes.
  * result: r0 = bytes written or -1 */
-static void std_fwrite(flint_vm *vm)
+static void std_write(flint_vm *vm)
 {
-    FILE *f;
-    flint_word h = vm->r[1];
-    flint_word off = vm->r[2];
-    flint_word cnt = vm->r[3];
-    size_t n;
+    flint_word fd = vm->r[0];
+    flint_word off = vm->r[1];
+    flint_word cnt = vm->r[2];
+    ssize_t n;
 
-    if (h < 1 || h > CLIF_MAX || clif_tab[h - 1] == 0) { vm->r[0] = -1; return; }
-    if (!clif_span(vm, off, cnt)) { vm->r[0] = -1; return; }
-    f = clif_tab[h - 1];
-    n = fwrite(vm->mem + off, 1, (size_t)cnt, f);
-    vm->r[0] = (n == (size_t)cnt) ? (flint_word)n : (flint_word)-1;
+    if (fd < 0 || fd > INT_MAX || !clif_span(vm, off, cnt)) {
+        vm->r[0] = -1; return;
+    }
+    do {
+        n = write((int)fd, vm->mem + off, (size_t)cnt);
+    } while (n < 0 && errno == EINTR);
+    vm->r[0] = (n < 0) ? (flint_word)-1 : (flint_word)n;
+}
+
+/* SYS 6 (FLINT_SYS_CLOSE): r0 = fd; result: r0 = 0 or -1 */
+static void std_close(flint_vm *vm)
+{
+    flint_word fd = vm->r[0];
+    if (fd < 0 || fd > INT_MAX) { vm->r[0] = -1; return; }
+    vm->r[0] = (close((int)fd) == 0) ? 0 : -1;
 }
 
 /* SYS 8: time -> r0 = UNIX epoch seconds */
@@ -165,18 +145,16 @@ static void std_time(flint_vm *vm)
 
 void flint_cli_sysoff(flint_vm *vm)
 {
-    /* stable ABI 0..3 (flint.h); file/time/debug extensions 4..9 */
+    /* ABI slots 0..6 (flint.h); time/debug extensions 8..9 */
     flint_sys_set(vm, FLINT_SYS_PRINT_STR, std_print_str);
     flint_sys_set(vm, FLINT_SYS_PUTC,      std_putc);
     flint_sys_set(vm, FLINT_SYS_GETC,      std_getc);
-    flint_sys_set(vm, FLINT_SYS_READ_MEM,  std_read_mem);
-
-    flint_sys_set(vm, CLI_SYS_FOPEN,  std_fopen);
-    flint_sys_set(vm, CLI_SYS_FCLOSE, std_fclose);
-    flint_sys_set(vm, CLI_SYS_FREAD,  std_fread);
-    flint_sys_set(vm, CLI_SYS_FWRITE, std_fwrite);
-    flint_sys_set(vm, CLI_SYS_TIME,   std_time);
-    flint_sys_set(vm, CLI_SYS_REGS,   std_regs);
+    flint_sys_set(vm, FLINT_SYS_OPEN,      std_open);
+    flint_sys_set(vm, FLINT_SYS_READ,      std_read);
+    flint_sys_set(vm, FLINT_SYS_WRITE,     std_write);
+    flint_sys_set(vm, FLINT_SYS_CLOSE,     std_close);
+    flint_sys_set(vm, CLI_SYS_TIME,        std_time);
+    flint_sys_set(vm, CLI_SYS_REGS,        std_regs);
 }
 
 /* ---------------- file helpers ---------------- */
@@ -287,7 +265,7 @@ static char *inc_load(void *ud, const char *name, const char *from_dir,
 
 /* run one assembled program; exit code = r0 at HLT, or -(ERR) on trap */
 int flint_cli_run_file(const char *path, uint32_t stack_extra,
-                       const char *include_root)
+                       const char *include_root, int use_manual_ram)
 {
     long len;
     char *src = read_whole(path, &len);
@@ -310,6 +288,7 @@ int flint_cli_run_file(const char *path, uint32_t stack_extra,
 
     flint_vm vm;
     flint_init(&vm, p.code, p.code_size, p.mem, p.mem_size);
+    flint_heap_set(&vm, p.heap_start, use_manual_ram);
     flint_cli_sysoff(&vm);
     flint_word rc = flint_run(&vm, p.entry);
 
@@ -355,6 +334,7 @@ typedef struct {
     char name[64];
     char entry[128];
     long stack;                 /* stack extra bytes; default 65536 */
+    int  manual_ram;            /* use_hand_made_ram_control; default 1 */
 } flint_proj;
 
 static void trim_ws(char *s)
@@ -386,6 +366,7 @@ static int proj_load(const char *root, flint_proj *pr, char *err, size_t ecap)
     }
 
     pr->stack = 65536;
+    pr->manual_ram = 1;
     pr->name[0] = 0;
     snprintf(pr->entry, sizeof pr->entry, "src/main.flt");
 
@@ -415,6 +396,16 @@ static int proj_load(const char *root, flint_proj *pr, char *err, size_t ecap)
                     snprintf(pr->entry, sizeof pr->entry, "%.100s", val);
                 } else if (strcmp(key, "stack") == 0) {
                     pr->stack = strtol(val, 0, 10);
+                } else if (strcmp(key, "use_hand_made_ram_control") == 0) {
+                    if (strcmp(val, "true") == 0)       pr->manual_ram = 1;
+                    else if (strcmp(val, "false") == 0) pr->manual_ram = 0;
+                    else {
+                        snprintf(err, ecap, "Flint.toml: "
+                                 "use_hand_made_ram_control: want true/false, got \"%.64s\"",
+                                 val);
+                        free(src);
+                        return -1;
+                    }
                 }
             }
         }
@@ -426,7 +417,8 @@ static int proj_load(const char *root, flint_proj *pr, char *err, size_t ecap)
 
 /* resolve project root -> entry path + stack */
 static int open_project(const char *root, char *entry, size_t cap,
-                        uint32_t *stack, char *err, size_t ecap)
+                        uint32_t *stack, int *manual_ram,
+                        char *err, size_t ecap)
 {
     flint_proj pr;
     if (proj_load(root, &pr, err, ecap) != 0) return -1;
@@ -436,6 +428,7 @@ static int open_project(const char *root, char *entry, size_t cap,
         return -1;
     }
     *stack = clamp_stack(pr.stack);
+    if (manual_ram) *manual_ram = pr.manual_ram;
     return 0;
 }
 
@@ -453,16 +446,18 @@ int has_flint_ext_public(const char *s)
 int flint_cli_cmd_run(const char *arg)
 {
     if (arg != 0 && has_flint_ext(arg))
-        return flint_cli_run_file(arg, 65536, 0);
+        return flint_cli_run_file(arg, 65536, 0, 1);   /* no project file */
 
     const char *root = arg ? arg : ".";
     char entry[600], err[256];
     uint32_t stack;
-    if (open_project(root, entry, sizeof entry, &stack, err, sizeof err) != 0) {
+    int manual_ram = 1;
+    if (open_project(root, entry, sizeof entry, &stack, &manual_ram,
+                     err, sizeof err) != 0) {
         fprintf(stderr, "flint: %s\n", err);
         return 2;
     }
-    return flint_cli_run_file(entry, stack, root);
+    return flint_cli_run_file(entry, stack, root, manual_ram);
 }
 
 int flint_cli_cmd_check(const char *arg)
@@ -473,7 +468,7 @@ int flint_cli_cmd_check(const char *arg)
     const char *root = arg ? arg : ".";
     char entry[600], err[256];
     uint32_t stack;
-    if (open_project(root, entry, sizeof entry, &stack, err, sizeof err) != 0) {
+    if (open_project(root, entry, sizeof entry, &stack, 0, err, sizeof err) != 0) {
         fprintf(stderr, "flint: %s\n", err);
         return 2;
     }
@@ -576,7 +571,8 @@ int flint_cli_cmd_new(const char *dirarg)
         "[project]\n"
         "name = \"%s\"\n"
         "entry = \"src/main.flt\"\n"
-        "stack = 65536\n",
+        "stack = 65536\n"
+        "use_hand_made_ram_control = true\n",
         name);
     fclose(f);
 

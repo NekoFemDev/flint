@@ -10,17 +10,23 @@
  * Isolated TU: libc is allowed (malloc for growable buffers);
  * a host embedding only the VM never links this file.
  *
- * Syntax v3:
- *   mnemonics  set copy load[.byte] store[.byte] add sub mul div mod
- *              and or xor shl shr inc dec neg not jump[.eq .ne .lt .ge]
- *              call return push pop sys exit
- *   registers  r0..r7
- *   mem        [rN]  [rN+num]  [rN-num]         (store: address first)
+ * Syntax v3 (v0.2.0 surface):
+ *   mnemonics  set copy load[.byte] loadx store[.byte] storx
+ *              add sub mul div mod and or xor shl shr inc dec neg not
+ *              jump[.eq .ne .lt .ge .lo .hs] call return enter leave
+ *              push pop alloc free sys exit
+ *   registers  r0..r15
+ *   mem        [rN]  [rN+num]  [rN-num]  [rN+rM]  [fp±num]  [fp+rM]
+ *              (store: address first)
  *   data       str "bytes", chars, nums | int num | bytes num
  *   sections   code: / data:  (code is the default)
  *   labels     name:  |  .local:   (locals attach to last global)
  *   includes   include "file"  |  .include "file"   (same directive)
  *   comments   // to end of line
+ *
+ * ABI (documented in flint.h): r0..r3 args/result, r4..r11 caller-saved,
+ * r12..r15 callee-saved. enter N / leave build the local frame; locals
+ * are addressed as [fp-8], [fp-16], ... .
  */
 #include <stdlib.h>
 #include <string.h>
@@ -46,10 +52,12 @@ static int bb_put(bbuf *x, int v)
     return 1;
 }
 
-static void bb_i64(bbuf *x, flint_word v)
+static int bb_i64(bbuf *x, flint_word v)
 {
     int i;
-    for (i = 0; i < 8; i++) bb_put(x, (int)(((uint64_t)v >> (8 * i)) & 0xFF));
+    for (i = 0; i < 8; i++)
+        if (!bb_put(x, (int)(((uint64_t)v >> (8 * i)) & 0xFF))) return 0;
+    return 1;
 }
 
 static void bb_patch(bbuf *x, uint32_t at, flint_word v)
@@ -350,25 +358,52 @@ enum { O_REG, O_NUM, O_SYM, O_MEM };
 
 typedef struct {
     int        kind;
-    uint8_t    reg;            /* O_REG / O_MEM base */
+    uint8_t    reg;            /* O_REG / O_MEM base (may be FLINT_REG_FP) */
+    uint8_t    idx;            /* O_MEM indexed form: the rM of [rN+rM] */
+    int        indexed;        /* O_MEM: 1 = [rN+rM], 0 = [rN±imm] */
     flint_word num;            /* O_NUM / O_MEM offset */
     char       name[T_MAX];    /* O_SYM */
 } opr;
 
+/* r0..r15, strictly; the fp pseudo-register is handled separately and is
+ * not a general register */
 static int reg_no(const token *t)
 {
-    if (t->type == T_IDENT && t->s[0] == 'r' &&
-        t->s[1] >= '0' && t->s[1] <= '7' && t->s[2] == 0)
-        return t->s[1] - '0';
+    int n;
+    if (t->type != T_IDENT || t->s[0] != 'r') return -1;
+    if (t->s[1] < '0' || t->s[1] > '9') return -1;
+    if (t->s[2] == 0) {
+        n = t->s[1] - '0';
+    } else if (t->s[2] >= '0' && t->s[2] <= '9' && t->s[3] == 0) {
+        n = (t->s[1] - '0') * 10 + (t->s[2] - '0');
+    } else {
+        return -1;
+    }
+    return (n < FLINT_NREGS) ? n : -1;
+}
+
+static int is_fp(const token *t)
+{
+    return t->type == T_IDENT && strcmp(t->s, "fp") == 0;
+}
+
+/* address-base operand: a general register or fp (encoded as FLINT_REG_FP) */
+static int mem_base_no(const token *t)
+{
+    int n = reg_no(t);
+    if (n >= 0) return n;
+    if (is_fp(t)) return FLINT_REG_FP;
     return -1;
 }
 
 static int parse_reg(asmx *a, int *r, token *t)
 {
+    int n;
     pk(a, t);
-    if (reg_no(t) < 0) { fail(a, "expected register r0..r7"); return 0; }
+    n = reg_no(t);
+    if (n < 0) { fail(a, "expected register r0..r15"); return 0; }
     nx(a, t);
-    *r = t->s[1] - '0';
+    *r = n;
     return 1;
 }
 
@@ -386,6 +421,10 @@ static int parse_imm(asmx *a, opr *o, token *t)
         nx(a, t);
         o->kind = O_NUM; o->num = t->num; return 1;
     }
+    if (is_fp(t)) {
+        fail(a, "'fp' is only valid as a memory base");
+        return 0;
+    }
     if (t->type == T_IDENT && reg_no(t) < 0) {
         char full[T_MAX];
         nx(a, t);
@@ -398,23 +437,43 @@ static int parse_imm(asmx *a, opr *o, token *t)
     return 0;
 }
 
+/* [rN] | [rN±imm] | [rN+rM] | [fp±imm] | [fp+rM]
+ * The indexed form [rN+rM] sets o->indexed and o->idx; the standard form
+ * leaves o->indexed = 0 and stores the offset in o->num. */
 static int parse_mem(asmx *a, opr *o, token *t)
 {
     int rb;
+    o->kind = O_MEM;
+    o->num = 0;
+    o->indexed = 0;
+    o->idx = 0;
+
     pk(a, t);
     if (t->type != T_PUNCT || t->s[0] != '[') { fail(a, "expected '['"); return 0; }
     nx(a, t);
-    if (!parse_reg(a, &rb, t)) return 0;
+
+    pk(a, t);
+    rb = mem_base_no(t);
+    if (rb < 0) { fail(a, "expected register or fp after '['"); return 0; }
+    nx(a, t);
     o->reg = (uint8_t)rb;
-    o->kind = O_MEM; o->num = 0;
+
     pk(a, t);
     if (t->type == T_PUNCT && (t->s[0] == '+' || t->s[0] == '-')) {
         int neg = (t->s[0] == '-');
         nx(a, t);
         pk(a, t);
-        if (t->type != T_NUM) { fail(a, "expected offset number"); return 0; }
-        nx(a, t);
-        o->num = neg ? -t->num : t->num;
+        if (!neg && reg_no(t) >= 0) {              /* [rb+ri] */
+            o->idx = (uint8_t)reg_no(t);
+            o->indexed = 1;
+            nx(a, t);
+        } else if (t->type == T_NUM) {             /* [rb±imm] */
+            nx(a, t);
+            o->num = neg ? -t->num : t->num;
+        } else {
+            fail(a, "expected offset number or index register");
+            return 0;
+        }
     }
     pk(a, t);
     if (t->type != T_PUNCT || t->s[0] != ']') { fail(a, "expected ']'"); return 0; }
@@ -425,7 +484,10 @@ static int parse_mem(asmx *a, opr *o, token *t)
 /* ---- emit helpers (code section) ---- */
 
 static void e_cst(asmx *a, int v)   { if (!bb_put(&a->code, v)) fail(a, "out of memory"); }
-static void e_ci64(asmx *a, flint_word v) { bb_i64(&a->code, v); }
+static void e_ci64(asmx *a, flint_word v)
+{
+    if (!bb_i64(&a->code, v)) fail(a, "out of memory");
+}
 static void e_regb(asmx *a, int r)  { e_cst(a, r); }
 
 /* 8-byte field: O_NUM/O_MEM emit raw; O_SYM registers a fixup */
@@ -442,10 +504,10 @@ static void e_imm(asmx *a, flint_word v) { e_ci64(a, v); }
 /* ---- dispatch table ---- */
 
 enum {
-    N_SET, N_COPY, N_LOAD, N_LOADB, N_STORE, N_STOREB,
+    N_SET, N_COPY, N_LOAD, N_LOADB, N_LOADX, N_STORE, N_STOREB, N_STORX,
     N_ARITH, N_INC, N_DEC, N_NEG, N_NOT,
-    N_JUMP, N_BRANCH, N_CALL, N_RET,
-    N_PUSH, N_POP, N_SYS, N_EXIT,
+    N_JUMP, N_BRANCH, N_CALL, N_RET, N_ENTER, N_LEAVE,
+    N_PUSH, N_POP, N_ALLOC, N_FREE, N_SYS, N_EXIT,
     D_STR, D_INT, D_BYTES
 };
 
@@ -456,8 +518,10 @@ static const mnem_t g_tab[] = {
     {"copy",       N_COPY,  0, 0},
     {"load",       N_LOAD,  0, 0},
     {"load.byte",  N_LOADB, 0, 0},
+    {"loadx",      N_LOADX, 0, 0},
     {"store",      N_STORE, 0, 0},
     {"store.byte", N_STOREB, 0, 0},
+    {"storx",      N_STORX, 0, 0},
     {"add",        N_ARITH, OP_ADD,  OP_ADDI},
     {"sub",        N_ARITH, OP_SUB,  OP_SUBI},
     {"mul",        N_ARITH, OP_MUL,  OP_MULI},
@@ -481,8 +545,12 @@ static const mnem_t g_tab[] = {
     {"jump.hs",    N_BRANCH, OP_JHS, OP_JHSI},
     {"call",       N_CALL,  0, 0},
     {"return",     N_RET,   0, 0},
+    {"enter",      N_ENTER, 0, 0},
+    {"leave",      N_LEAVE, 0, 0},
     {"push",       N_PUSH,  0, 0},
     {"pop",        N_POP,   0, 0},
+    {"alloc",      N_ALLOC, 0, 0},
+    {"free",       N_FREE,  0, 0},
     {"sys",        N_SYS,   0, 0},
     {"exit",       N_EXIT,  0, 0},
     {"str",        D_STR,   0, 0},
@@ -530,25 +598,63 @@ static void m_copy(asmx *a)
     e_cst(a, OP_COPY); e_regb(a, rd); e_regb(a, rs);
 }
 
+/* load[.byte] rd, [rb±off]      -> OP_LOADB / OP_LOADW
+ * load         rd, [rb+ri]       -> OP_LOADX (word-only) */
 static void m_load(asmx *a, int byte)
 {
-    int rd, rb; opr mo; token t;
+    int rd; opr mo; token t;
     if (!parse_reg(a, &rd, &t)) return;
     if (!need_comma(a, &t)) return;
     if (!parse_mem(a, &mo, &t)) return;
-    rb = mo.reg;
+    if (mo.indexed) {
+        if (byte) { fail(a, "indexed addressing is word-only (load/store)"); return; }
+        e_cst(a, OP_LOADX);
+        e_regb(a, rd); e_regb(a, mo.reg); e_regb(a, mo.idx);
+        return;
+    }
     e_cst(a, byte ? OP_LOADB : OP_LOADW);
-    e_regb(a, rd); e_regb(a, rb); e_imm(a, mo.num);
+    e_regb(a, rd); e_regb(a, mo.reg); e_imm(a, mo.num);
 }
 
+/* store[.byte] [rb±off], rs     -> OP_STOREB / OP_STOREW
+ * store        [rb+ri], rs      -> OP_STOREX (word-only) */
 static void m_store(asmx *a, int byte)
 {
     int rs; opr mo; token t;
     if (!parse_mem(a, &mo, &t)) return;
     if (!need_comma(a, &t)) return;
     if (!parse_reg(a, &rs, &t)) return;
+    if (mo.indexed) {
+        if (byte) { fail(a, "indexed addressing is word-only (load/store)"); return; }
+        e_cst(a, OP_STOREX);
+        e_regb(a, mo.reg); e_regb(a, mo.idx); e_regb(a, rs);
+        return;
+    }
     e_cst(a, byte ? OP_STOREB : OP_STOREW);
     e_regb(a, mo.reg); e_regb(a, rs); e_imm(a, mo.num);
+}
+
+/* explicit indexed forms: fail loudly if the operand is not [rb+ri] */
+static void m_loadx(asmx *a)
+{
+    int rd; opr mo; token t;
+    if (!parse_reg(a, &rd, &t)) return;
+    if (!need_comma(a, &t)) return;
+    if (!parse_mem(a, &mo, &t)) return;
+    if (!mo.indexed) { fail(a, "loadx requires [rb+ri]"); return; }
+    e_cst(a, OP_LOADX);
+    e_regb(a, rd); e_regb(a, mo.reg); e_regb(a, mo.idx);
+}
+
+static void m_storx(asmx *a)
+{
+    int rs; opr mo; token t;
+    if (!parse_mem(a, &mo, &t)) return;
+    if (!need_comma(a, &t)) return;
+    if (!parse_reg(a, &rs, &t)) return;
+    if (!mo.indexed) { fail(a, "storx requires [rb+ri]"); return; }
+    e_cst(a, OP_STOREX);
+    e_regb(a, mo.reg); e_regb(a, mo.idx); e_regb(a, rs);
 }
 
 /* add rd, ra, rb    -> three-address
@@ -689,6 +795,24 @@ static void m_pop(asmx *a)
     e_cst(a, OP_POP); e_regb(a, rd);
 }
 
+/* alloc rd, imm   -> rd = heap cursor, cursor += imm */
+static void m_alloc(asmx *a)
+{
+    int rd; opr o; token t;
+    if (!parse_reg(a, &rd, &t)) return;
+    if (!need_comma(a, &t)) return;
+    if (!parse_imm(a, &o, &t)) return;
+    e_cst(a, OP_ALLOC); e_regb(a, rd); e_field(a, &o, F_ANY);
+}
+
+/* free rs         -> validated no-op (auto: RET reclaims; manual: caller) */
+static void m_free(asmx *a)
+{
+    int rs; token t;
+    if (!parse_reg(a, &rs, &t)) return;
+    e_cst(a, OP_FREE); e_regb(a, rs);
+}
+
 static void m_sys(asmx *a)
 {
     token t;
@@ -702,6 +826,18 @@ static void m_sys(asmx *a)
 /* exit: OP_HLT */
 static void m_exit(asmx *a) { e_cst(a, OP_HLT); }
 static void m_ret(asmx *a)  { e_cst(a, OP_RET); }
+
+/* enter N: frame prologue — push fp, fp = sp, reserve N local bytes */
+static void m_enter(asmx *a)
+{
+    opr o; token t;
+    if (!parse_imm(a, &o, &t)) return;
+    if (o.kind == O_NUM && o.num < 0) { fail(a, "enter size must be >= 0"); return; }
+    e_cst(a, OP_ENTER); e_field(a, &o, F_ANY);
+}
+
+/* leave: frame epilogue — sp = fp, pop fp */
+static void m_leave(asmx *a) { e_cst(a, OP_LEAVE); }
 
 /* ---- data directives (mem section) ---- */
 
@@ -741,23 +877,46 @@ static void d_str(asmx *a)
     }
 }
 
+/* int 42 | int 10, 20, 30, 40 | int -5, 7 — each value is one word */
 static void d_int(asmx *a)
 {
     token t;
-    pk(a, &t);
-    if (t.type != T_NUM) { fail(a, "expected number"); return; }
-    nx(a, &t);
-    bb_i64(&a->mem, t.num);
+    for (;;) {
+        int neg = 0;
+        flint_word v;
+        pk(a, &t);
+        if (t.type == T_PUNCT && t.s[0] == '-') {
+            neg = 1;
+            nx(a, &t);
+            pk(a, &t);
+        }
+        if (t.type != T_NUM) { fail(a, "expected number"); return; }
+        nx(a, &t);
+        v = neg ? -t.num : t.num;
+        if (!bb_i64(&a->mem, v)) { fail(a, "out of memory"); return; }
+        pk(a, &t);
+        if (t.type == T_PUNCT && t.s[0] == ',') { nx(a, &t); continue; }
+        break;
+    }
 }
 
+/* bytes 16 | bytes 16, 8 — zero runs, comma-separated */
 static void d_bytes(asmx *a)
 {
     token t;
-    uint32_t n;
-    pk(a, &t);
-    if (t.type != T_NUM) { fail(a, "expected size"); return; }
-    nx(a, &t);
-    for (n = 0; n < (uint32_t)t.num; n++) { if (!bb_put(&a->mem, 0)) fail(a, "out of memory"); }
+    for (;;) {
+        uint32_t n;
+        pk(a, &t);
+        if (t.type != T_NUM) { fail(a, "expected size"); return; }
+        nx(a, &t);
+        if (t.num < 0) { fail(a, "bytes size must be >= 0"); return; }
+        for (n = 0; n < (uint32_t)t.num; n++) {
+            if (!bb_put(&a->mem, 0)) fail(a, "out of memory");
+        }
+        pk(a, &t);
+        if (t.type == T_PUNCT && t.s[0] == ',') { nx(a, &t); continue; }
+        break;
+    }
 }
 
 /* ---- program scanner ---- */
@@ -883,8 +1042,10 @@ static int asm_statement(asmx *a, const mnem_t *m, const char *nm)
     case N_COPY:   m_copy(a);     break;
     case N_LOAD:   m_load(a, 0);  break;
     case N_LOADB:  m_load(a, 1);  break;
+    case N_LOADX:  m_loadx(a);    break;
     case N_STORE:  m_store(a, 0); break;
     case N_STOREB: m_store(a, 1); break;
+    case N_STORX:  m_storx(a);    break;
     case N_ARITH:  m_arith(a, m->opA, m->opB); break;
     case N_INC:    m_incdec(a, OP_INC); break;
     case N_DEC:    m_incdec(a, OP_DEC); break;
@@ -894,8 +1055,12 @@ static int asm_statement(asmx *a, const mnem_t *m, const char *nm)
     case N_BRANCH: m_branch(a, m->opA, m->opB); break;
     case N_CALL:   m_call(a);     break;
     case N_RET:    m_ret(a);      break;
+    case N_ENTER:  m_enter(a);    break;
+    case N_LEAVE:  m_leave(a);    break;
     case N_PUSH:   m_push(a);     break;
     case N_POP:    m_pop(a);      break;
+    case N_ALLOC:  m_alloc(a);    break;
+    case N_FREE:   m_free(a);     break;
     case N_SYS:    m_sys(a);      break;
     case N_EXIT:   m_exit(a);     break;
     case D_STR:    d_str(a);      break;
@@ -1213,7 +1378,12 @@ int flint_assemble_ctx(const char *src, const char *src_name,
 {
     asmx a;
     int i, e;
+    if (!out || !src) {
+        if (err && err_size) snprintf(err, err_size, "bad assemble arguments");
+        return -1;
+    }
     memset(&a, 0, sizeof(a));
+    memset(out, 0, sizeof(*out));
     a.src = src; a.ipos = 0; a.line = 1; a.section = S_CODE;
     a.inc_fn = inc_fn; a.inc_ud = inc_ud;
     a.cur_name = dupstr(src_name ? src_name : "<src>");
@@ -1233,20 +1403,24 @@ int flint_assemble_ctx(const char *src, const char *src_name,
             e = -1;
         } else {
             uint32_t data_n = a.mem.n;
-            uint32_t reuse  = (data_n + 15) & ~15u;
+            uint32_t reuse  = (data_n + 15) & ~15u;   /* heap starts here */
             uint32_t msize  = reuse + (stack_extra ? stack_extra : 4096);
             i = (int)a.syms[mi].addr;
 
             out->code = (flint_byte *)calloc(a.code.n ? a.code.n : 1, 1);
             out->mem  = (flint_byte *)calloc(msize, 1);
-            if (!out->code || !out->mem) { e = -1; fail(&a, "out of memory"); }
-            else {
+            if (!out->code || !out->mem) {
+                free(out->code); free(out->mem);
+                out->code = 0; out->mem = 0;
+                e = -1; fail(&a, "out of memory");
+            } else {
                 memcpy(out->code, a.code.b, a.code.n);
                 memset(out->mem, 0, msize);
                 if (data_n) memcpy(out->mem, a.mem.b, data_n);
-                out->code_size = a.code.n;
-                out->mem_size  = msize;
-                out->entry     = (uint32_t)i;
+                out->code_size  = a.code.n;
+                out->mem_size   = msize;
+                out->entry      = (uint32_t)i;
+                out->heap_start = reuse;
             }
         }
     }

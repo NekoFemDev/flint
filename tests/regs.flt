@@ -1,14 +1,23 @@
-// register dump: r0..r7 loaded 7..0, debug sys 9 prints them; order proves mapping
+// register dump: r0..r15 loaded 15..0, debug sys 9 prints them;
+// the dump now covers the full expanded register file
 code:
 main:
-    set r0, 7
-    set r1, 6
-    set r2, 5
-    set r3, 4
-    set r4, 3
-    set r5, 2
-    set r6, 1
-    set r7, 0
-    sys 9                  // regs -> "r0 = 7" .. "r7 = 0"
+    set r0, 15
+    set r1, 14
+    set r2, 13
+    set r3, 12
+    set r4, 11
+    set r5, 10
+    set r6, 9
+    set r7, 8
+    set r8, 7
+    set r9, 6
+    set r10, 5
+    set r11, 4
+    set r12, 3
+    set r13, 2
+    set r14, 1
+    set r15, 0
+    sys 9                  // regs -> "r0 = 15" .. "r15 = 0"
     set r0, 0
     exit

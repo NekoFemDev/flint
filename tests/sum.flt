@@ -15,4 +15,5 @@ done:
     call s_num               // prints "55" via sys 0 (span print)
     set r0, 10               // '\n'
     sys 1
+    set r0, 0                // clean exit code: do not leak the newline
     exit

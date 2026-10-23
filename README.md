@@ -1,14 +1,14 @@
-# FLINT 0.1.0
+# FLINT 0.2.0-pre.1
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.
 No dependencies, no global state, no flags register.
 
 ```
-vm core:       ~45 opcodes, word = int64, 8 registers, flat memory
+vm core:       ~55 opcodes, word = int64, 16 registers, flat memory
 embed core:    include/flint.h + src/flint_core.c   (zero libc)
                + src/flint_asm.c                    (only if asm→bytecode is needed)
-executable:    + src/flint_cli.c + src/main.c       (CLI host: syscalls over stdio)
+executable:    + src/flint_cli.c + src/main.c       (CLI host: stdio + POSIX file syscalls)
 ```
 
 ---
@@ -18,17 +18,18 @@ executable:    + src/flint_cli.c + src/main.c       (CLI host: syscalls over std
 | Property      | Value                                                        |
 |---------------|--------------------------------------------------------------|
 | Word size     | **int64 signed** (`flint_word`), little-endian               |
-| Registers     | `r0..r7` — 8 general-purpose                                 |
+| Registers     | `r0..r15` — 16 general-purpose; ABI: `r0..r3` args/result, `r4..r11` caller-saved, `r12..r15` callee-saved |
 | Memory        | flat byte image; a word is 8 consecutive bytes, no alignment required |
-| Stack         | single (data + return addresses), grows down from the end of memory; `push`/`pop` move 8 bytes |
+| Stack         | single (locals + return addresses), grows down from the end of memory; `push`/`pop` move 8 bytes; a CALL frame is one word (return pc); `enter N`/`leave` build a local frame ([saved fp] + N local bytes) |
 | Comparisons   | no flags register: comparison is *fused into branches* (MIPS/RISC-V lineage) |
-| Syscalls      | host-provided table: up to 64 slots, `sys N` calls the host function; r0 carries the argument and the result |
+| Syscalls      | host-provided table: up to 64 slots, `sys N` calls the host function; arguments/result travel in r0..r3 |
 | Steps         | `max_steps` — protection against runaway loops; `0` = unlimited |
 
-Stack and data share one `mem` image:
+Stack, data and heap share one `mem` image:
 
 ```
 [ data (from the start): strings/numbers/buffers — size padded up to 16 ]
+[ heap: alloc grows a cursor from the aligned end of the data             ]
 [ ...stack...            (push/pop and CALL/RET frames grow down from mem_size) ]
 ```
 
@@ -36,9 +37,11 @@ The assembled memory image (from `flint_assemble`) is **zeroed** — `bytes N`
 and everything past the data section reads as zeros until first written.
 
 A program ends with `exit` (opcode `HLT`). The program's return code is **r0
-at exit time**: in the CLI that is the process exit code (truncated to the low
-31 bits: `720 → 208`); for an embedded host it is the return value of
-`flint_run`. Convention: exit cleanly with `set r0, 0` right before `exit`.
+at exit time**. `flint_run` returns r0 to an embedded host. In the CLI, r0 is
+first narrowed to a C `int` with `r0 & 0x7FFFFFFF`; the operating system then
+reports only the low 8 bits of that process status, so `r0 = 720` appears as
+`208` in the shell (`720 & 0xFF`). Convention: exit cleanly with `set r0, 0`
+right before `exit`.
 
 ---
 
@@ -61,8 +64,8 @@ CLI exit codes:
 | Code | Meaning                                            |
 |------|----------------------------------------------------|
 | 0    | program ran, r0 = 0                                |
-| N    | program ran, r0 = N (N < 2^31)                     |
-| −err | runtime trap: −9 = division by zero, −8 = step limit, −7 = stack overflow/underflow, −6 = bad memory address, −5 = bad register, −4 = unknown opcode, −3 = bad pc, −2 = syscall without a host handler |
+| N    | program ran, r0 = N (N < 2^31; the shell observes N & 0xFF) |
+| −err | runtime trap; `err` is a `FLINT_ERR_*` code: −1 NOSYS, −2 BADPC, −3 BADOP, −4 BADREG, −5 BADMEM, −6 STACK, −7 DIV0, −8 LIMIT, −9 INIT |
 | 1    | assembly error (source line and reason go to stderr) |
 | 2    | file/project could not be read                      |
 
@@ -98,6 +101,7 @@ demo/
 name = "demo"
 entry = "src/main.flt"
 stack = 65536
+use_hand_made_ram_control = true
 ```
 
 Supported TOML subset: `# comments`, sections `[...]`, `key = value`;
@@ -108,8 +112,11 @@ string values are quoted. Keys:
 | `name` | directory name   | plain project name                        |
 | `entry`| `src/main.flt` | path to the main program (relative to project root) |
 | `stack`| `65536`          | extra memory bytes reserved for the stack |
+| `use_hand_made_ram_control` | `true` | accepted for compatibility; ignored since v0.2.0 (`return` never rewinds the heap cursor) |
 
 Run from inside a project directory: `flint run` (no arguments).
+Single-file runs (`flint run file.flt`) have no project file and use the
+default RAM mode (`true`; the key is informational only in v0.2.0).
 
 ---
 
@@ -122,7 +129,7 @@ Run from inside a project directory: `flint run` (no arguments).
 - Character literal: `'A'`; escapes in strings/characters: `\n \t \r \0 \\ \' \"`.
 - Strings: `"..."` (one per data directive statement; no auto-concatenation).
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*` — labels and mnemonic names.
-- Registers: `r0`…`r7` (strict; `r9` is an error).
+- Registers: `r0`…`r15` (strict; `r16` is an error). `fp` is an address-base pseudo-register used for frame locals.
 - Registers and mnemonics are case-sensitive: `r0` is valid, `R0` is not.
 
 ### Labels
@@ -189,9 +196,13 @@ without a resolver.
 [r2]        // base address in a register
 [r3+4]      // base + offset
 [r3-8]      // base − offset
+[r1+r2]     // base + index register (word loads/stores; byte address)
+[fp-8]      // frame local: fp minus offset
+[fp+r2]     // frame base + index register
 ```
 
-The store form is **address first**:
+The indexed form is word-only: `loadx` / `storx` (or plain `load`/`store`,
+which detect `[rb+ri]` automatically). The store form is **address first**:
 
 ```
 store [r3+4], r0          // word (8 bytes)
@@ -219,9 +230,17 @@ an immediate. The short arithmetic form `add rd, imm` means `rd = rd + imm`.
 | `copy rd, rs`                | 3     | rd = rs                                      |
 | `load rd, [rb]`              | 11    | rd = int64 LE read at [rb]                   |
 | `load rd, [rb±off]`          | 11    | same with an offset                          |
+| `load rd, [rb+ri]`           | 4     | indexed: rd = word at rb+ri                  |
+| `loadx rd, [rb+ri]`          | 4     | explicit indexed form (same encoding)        |
 | `load.byte rd, [rb]`         | 11    | one byte, zero-extended                      |
 | `store [rb±off], rs`         | 11    | full word write at the address               |
+| `store [rb+ri], rs`          | 4     | indexed: word write at rb+ri                 |
+| `storx [rb+ri], rs`          | 4     | explicit indexed form (same encoding)        |
 | `store.byte [rb±off], rs`    | 11    | one-byte write at the address                |
+
+`set rd, imm` loads an immediate, character literal, or label — it is not a
+register move. Use `copy rd, rs` for register-to-register transfer; `set r3, r1`
+is rejected at assembly.
 
 ### Arithmetic and logic (3-address + shortimm)
 
@@ -282,14 +301,46 @@ Unconditional jump and procedures:
 | Form           | Bytes | Semantics                                       |
 |----------------|-------|-------------------------------------------------|
 | `jump label`   | 9     | pc = label (unconditional)                      |
-| `call label`   | 9     | next pc → stack; pc = label                     |
-| `return`       | 1     | pc = stack (return address)                     |
+| `call label`   | 9     | push return pc; pc = label                      |
+| `return`       | 1     | pop the return pc                               |
+| `enter imm`    | 10    | push fp; fp = sp; sp −= imm (reserve locals)    |
+| `leave`        | 1     | sp = fp; pop fp                                 |
 | `push rs`      | 2     | sp −= 8; mem[sp] = rs                           |
 | `push imm`     | 9     | immediate onto the stack                        |
 | `pop rd`       | 2     | rd = mem[sp]; sp += 8                           |
 
 Recursion — `call`/`return` share the same stack as `push`/`pop`:
-the factorial example (depth × 16 bytes per frame) runs as-is.
+the factorial example (one pushed register + a one-word return frame
+per level) runs as-is. Functions that need locals use `enter N` /
+`leave`; the slots are `[fp-8]`, `[fp-16]`, … and the callee is
+responsible for preserving `r12..r15` (push/pop around the body).
+
+### Memory allocation (bump allocator)
+
+A bump-allocator arena sits between the data section and the stack: the
+cursor starts at the aligned end of the data image and grows up, while
+the stack grows down from the end of memory. A block that would cross
+the stack pointer traps as a bad memory access; an `enter` frame that
+would grow into the heap traps as a stack violation.
+
+| Form            | Bytes | Semantics                                        |
+|-----------------|-------|--------------------------------------------------|
+| `alloc rd, imm` | 10    | rd = heap cursor; cursor += imm                  |
+| `free rs`       | 2     | operand validated; no-op (bump allocator)        |
+
+```
+alloc r1, 64        // r1 = block address; the cursor moves up
+free r1             // validated no-op today
+```
+
+Since v0.2.0 `return` never rewinds the cursor: an allocation made by a
+callee remains valid after the caller regains control, so returning an
+allocated array from a function is safe. The old `Flint.toml`
+`use_hand_made_ram_control` key is accepted for compatibility but no
+longer changes behaviour.
+
+`free` is deliberately a validated no-op: real reclaim needs per-block
+size metadata (planned upgrade: a size word at `rd-8`, LIFO reclaim).
 
 ### Platform
 
@@ -302,27 +353,27 @@ the factorial example (depth × 16 bytes per frame) runs as-is.
 
 ## Syscalls (included CLI host)
 
-Convention: arguments pass in `r1..r3`; `r0` is always the result slot (an
+Convention: arguments travel in `r0..r2`; `r0` is also the result slot (an
 argument in `r0` is consumed before the result lands there). Memory arguments
 point into the flat `mem` image — the host validates every span against
-image bounds. Tables: handles are 1-based (0 is not a handle).
+image bounds. File results are POSIX descriptors; failures return −1.
 
-| Slot | Name      | Args (r1..r3) | Result                         |
-|------|-----------|---------------|--------------------------------|
+| Slot | Name      | Arguments | Result                         |
+|------|-----------|-----------|--------------------------------|
 | 0    | print_str | r1 = addr, r2 = len | writes r2 raw bytes (NULs included); clobbers no register |
 | 1    | putc      | r0 = character | print the low byte            |
 | 2    | getc      | —             | r0 = character or −1 (EOF)     |
-| 3    | read_mem  | —             | reserved (debug stub: r0 = −1) |
-| 4    | fopen     | r1 = mode (0 read / 1 write / 2 append), r2 = NUL-terminated path in `mem` | r0 = handle or −1 |
-| 5    | fclose    | r1 = handle   | r0 = 0 or −1                   |
-| 6    | fread     | r1 = handle, r2 = buffer in `mem`, r3 = max bytes | r0 = bytes read, 0 on EOF, −1 on error |
-| 7    | fwrite    | r1 = handle, r2 = buffer in `mem`, r3 = bytes | r0 = bytes written or −1 |
+| 3    | open      | r0 = NUL-terminated path in `mem`, r1 = flags (0 read / 1 write) | r0 = fd or −1 |
+| 4    | read      | r0 = fd, r1 = buffer in `mem`, r2 = max bytes | r0 = bytes read (0 on EOF) or −1 |
+| 5    | write     | r0 = fd, r1 = buffer in `mem`, r2 = bytes | r0 = bytes written or −1 |
+| 6    | close     | r0 = fd       | r0 = 0 or −1                   |
 | 8    | time      | —             | r0 = UNIX epoch seconds        |
-| 9    | regs      | —             | debug: print r0..r7, one per line (not part of the stable ABI) |
+| 9    | regs      | —             | debug: print r0..r15, one per line (not part of the stable ABI) |
 
-Slots 0..3 are the standard set (`FLINT_SYS_*` in `flint.h`); 4..8 are the
-CLI extensions. Slots 10..63 stay free for embedding hosts. Calling an
-unfilled slot is a predictable `NOSYS` trap.
+`open` flags: `0` = read-only; `1` = write, creating/truncating the file.
+Slots 0..6 are the standard set (`FLINT_SYS_*` in `flint.h`); 8..9 are the
+CLI extensions. Slots 7 and 10..63 stay free for embedding hosts. Calling
+an unfilled slot is a predictable `NOSYS` trap.
 
 Common recipes:
 
@@ -331,7 +382,7 @@ sys 0           // print a memory span (r1 = addr, r2 = len) — stdlib s_print
 sys 1           // putc: low byte of r0
 sys 2           // manual stdin reading, one character at a time
 sys 9           // debug: dump registers mid-run
-sys 4/6/7       // file round-trip: fopen(path) -> fread/fwrite(buf, n) -> fclose
+sys 3/4/5/6     // file round-trip: open(path) -> read/write(buf, n) -> close
 ```
 
 ---
@@ -398,7 +449,7 @@ const char *txt = vm.err_text;         /* human-readable line */
 
 ```
 make          # build/flint
-make test     # full bench: core (7) + asm (16) + examples
+make test     # full bench: core + asm + heap + examples
 make clean
 ```
 
@@ -414,10 +465,11 @@ tests/hello.flt   Hello, FLINT!                       (byte-wise string printing
 tests/sum.flt     55                                  (sum 1..10)
 tests/fact.flt    720                                 (recursion: fact(6))
 tests/off.flt     119                                 (store/load with an offset)
-tests/fio.flt     42                                  (file write→read round-trip)
-tests/regs.flt    r0 = 7 … r7 = 0                     (register dump)
+tests/fio.flt     42                                  (open/write/read/close round-trip)
+tests/regs.flt    r0 = 15 … r15 = 0                   (register dump)
 tests/libdemo.flt 63 / 9 / 11 / HELLO WORLD           (stdlib + string includes)
 tests/mem.flt     flint                               (s_memset/s_memcpy via .include)
+tests/heap.flt    heap mode: manual + heap ok         (alloc/free + persistent allocations)
 ```
 
 Run one: `flint run tests/sum.flt` — or all of them: `make test`.

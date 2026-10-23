@@ -5,7 +5,7 @@ SRC       = src/flint_core.c src/flint_asm.c src/flint_cli.c
 TESTSRC   = src/flint_core.c src/flint_asm.c
 
 BIN       = build/flint
-TESTS     = build/test_core build/test_asm
+TESTS     = build/test_core build/test_asm build/test_heap
 
 all: $(BIN)
 
@@ -21,20 +21,27 @@ build/test_asm: tests/test_asm.c src/flint_core.c src/flint_asm.c include/flint.
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(TESTSRC) tests/test_asm.c -o $@
 
+build/test_heap: tests/test_heap.c src/flint_core.c src/flint_asm.c include/flint.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) $(TESTSRC) tests/test_heap.c -o $@
+
 test: $(TESTS) $(BIN)
 	./build/test_core
 	./build/test_asm
+	./build/test_heap
 	@./$(BIN) tests/hello.flt  | grep -q "Hello, FLINT!"   \
 	  && ./$(BIN) tests/sum.flt   | grep -q 55            \
 	  && ./$(BIN) tests/fact.flt  | grep -q 720           \
 	  && ./$(BIN) tests/off.flt   | grep -q 119           \
 	  && ./$(BIN) tests/fio.flt   | grep -q 42            \
-	  && ./$(BIN) tests/regs.flt  | grep -q "r0 = 7"       \
-	  && ./$(BIN) tests/regs.flt  | grep -q "r7 = 0"      \
+	  && ./$(BIN) tests/regs.flt  | grep -q "r0 = 15"      \
+	  && ./$(BIN) tests/regs.flt  | grep -q "r15 = 0"     \
 	  && ./$(BIN) tests/libdemo.flt | grep -q 63          \
 	  && ./$(BIN) tests/libdemo.flt | grep -q 9           \
+	  && ./$(BIN) tests/heap.flt  | grep -q "heap ok"       \
+	  && ./$(BIN) tests/heap.flt  | grep -q "mode: manual"  \
 	  && ./$(BIN) tests/mem.flt   | grep -q "flint"
-	@echo "examples: 8/8 programs run"
+	@echo "examples: 9/9 programs run"
 
 clean:
 	rm -rf build
