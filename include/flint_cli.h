@@ -22,18 +22,33 @@ enum {
 
 void flint_cli_sysoff(flint_vm *vm);
 
-/* file extension predicate (used by main dispatch) */
-int has_flint_ext_public(const char *s);
+/* file predicates (used by main dispatch) */
+int has_flint_ext_public(const char *s);   /* .flt source            */
+int has_fbc_ext_public(const char *s);     /* .fbc bytecode image    */
 
-/* single-file front-end */
-/* use_manual_ram is retained for compatibility; since v0.2.0 RETURN never
- * rewinds the heap cursor, so the flag no longer changes allocation lifetime */
+/* memory model (flint.h flint_mem_mode) as text: "manual" / "auto".
+ * parse accepts either spelling, case-insensitively, ignoring surrounding
+ * blanks and a trailing newline (prompt input); returns 0 on success and
+ * -1 for anything else. */
+const char *flint_mem_mode_name(flint_mem_mode mode);
+int flint_mem_mode_parse(const char *s, flint_mem_mode *out);
+
+/* single-file front-end. mem is the project memory model; since v0.2.0
+ * it is informational — RETURN never rewinds the heap cursor, so an
+ * allocation outlives the allocating call in either mode. */
 int flint_cli_run_file(const char *path, uint32_t stack_extra,
-                       const char *include_root, int use_manual_ram);
+                       const char *include_root, flint_mem_mode mem);
 int flint_cli_check_file(const char *path, const char *include_root);
 
+/* bytecode-image front-end (.fbc written by `flint build`): execute the
+ * stored code+mem images directly, no assembler at run time */
+int flint_cli_run_image(const char *path);
+
 /* command verbs: arg may be NULL (cwd project) */
-int flint_cli_cmd_new(const char *dir);
+/* scaffold <dir>. mem_given == 0 asks on stdin (Enter = manual). */
+int flint_cli_cmd_new(const char *dir, flint_mem_mode mem, int mem_given);
+/* assemble <file.flt|dir> into one .fbc image; out NULL = build/<name>.fbc */
+int flint_cli_cmd_build(const char *arg, const char *out);
 int flint_cli_cmd_run(const char *arg);   /* .flt file or project dir */
 int flint_cli_cmd_check(const char *arg);
 int flint_cli_cmd_dis(const char *arg);

@@ -15,6 +15,7 @@
 #include <sys/types.h>
 #include "flint.h"
 #include "flint_cli.h"
+#include "flint_img.h"
 
 /* ---------------- standard syscalls ---------------- */
 
@@ -263,9 +264,24 @@ static char *inc_load(void *ud, const char *name, const char *from_dir,
     return 0;
 }
 
-/* run one assembled program; exit code = r0 at HLT, or -(ERR) on trap */
+/* init + run an assembled image; exit code = r0 at HLT, or -(ERR) on
+ * trap. Does not free p — the caller owns the images. */
+static int run_prog(flint_prog *p, flint_mem_mode mem)
+{
+    flint_vm vm;
+    flint_init(&vm, p->code, p->code_size, p->mem, p->mem_size);
+    flint_heap_set(&vm, p->heap_start, mem);
+    flint_cli_sysoff(&vm);
+    flint_word rc = flint_run(&vm, p->entry);
+
+    if (vm.err == FLINT_OK) return (int)(rc & 0x7FFFFFFF);
+    fprintf(stderr, "flint: runtime: %s\n", vm.err_text);
+    return (int)(-(int64_t)vm.err);
+}
+
+/* assemble one source file (includes resolved by the host) and run it */
 int flint_cli_run_file(const char *path, uint32_t stack_extra,
-                       const char *include_root, int use_manual_ram)
+                       const char *include_root, flint_mem_mode mem)
 {
     long len;
     char *src = read_whole(path, &len);
@@ -286,19 +302,21 @@ int flint_cli_run_file(const char *path, uint32_t stack_extra,
     free(src);
     inc_ctx_free(&ic);
 
-    flint_vm vm;
-    flint_init(&vm, p.code, p.code_size, p.mem, p.mem_size);
-    flint_heap_set(&vm, p.heap_start, use_manual_ram);
-    flint_cli_sysoff(&vm);
-    flint_word rc = flint_run(&vm, p.entry);
+    int code = run_prog(&p, mem);
+    flint_prog_free(&p);
+    return code;
+}
 
-    int code;
-    if (vm.err == FLINT_OK) {
-        code = (int)(rc & 0x7FFFFFFF);
-    } else {
-        fprintf(stderr, "flint: runtime: %s\n", vm.err_text);
-        code = (int)(-(int64_t)vm.err);
+/* load a built .fbc image and run it — no assembler involved */
+int flint_cli_run_image(const char *path)
+{
+    flint_prog p; flint_mem_mode mem = FLINT_MEM_MANUAL; char err[384] = "";
+
+    if (flint_img_load(path, &p, &mem, err, sizeof err) != 0) {
+        fprintf(stderr, "flint: %s\n", err);
+        return 2;
     }
+    int code = run_prog(&p, mem);
     flint_prog_free(&p);
     return code;
 }
@@ -330,11 +348,49 @@ int flint_cli_check_file(const char *path,
 
 /* ---------------- project layer (Flint.toml) ---------------- */
 
+/* ---- memory model: text <-> flint_mem_mode ---- */
+
+const char *flint_mem_mode_name(flint_mem_mode mode)
+{
+    return (mode == FLINT_MEM_AUTO) ? "auto" : "manual";
+}
+
+/* see flint_cli.h for the contract */
+int flint_mem_mode_parse(const char *s, flint_mem_mode *out)
+{
+    char word[8];
+    size_t n = 0, i;
+
+    if (!s) return -1;
+    while (*s == ' ' || *s == '\t') s++;
+    while (s[n] != 0 && s[n] != ' ' && s[n] != '\t' &&
+           s[n] != '\n' && s[n] != '\r') {
+        if (n + 1 >= sizeof word) return -1;       /* word too long */
+        word[n] = (char)((s[n] >= 'A' && s[n] <= 'Z')
+                         ? (s[n] + ('a' - 'A')) : s[n]);
+        n++;
+    }
+    i = n;                                  /* only blanks may follow */
+    while (s[i] == ' ' || s[i] == '\t') i++;
+    if (s[i] != 0 && s[i] != '\n' && s[i] != '\r') return -1;
+    word[n] = 0;
+
+    if (strcmp(word, "manual") == 0) {
+        if (out) *out = FLINT_MEM_MANUAL;
+        return 0;
+    }
+    if (strcmp(word, "auto") == 0) {
+        if (out) *out = FLINT_MEM_AUTO;
+        return 0;
+    }
+    return -1;
+}
+
 typedef struct {
     char name[64];
     char entry[128];
     long stack;                 /* stack extra bytes; default 65536 */
-    int  manual_ram;            /* use_hand_made_ram_control; default 1 */
+    flint_mem_mode mem;         /* Flint.toml `memory`; default manual */
 } flint_proj;
 
 static void trim_ws(char *s)
@@ -366,7 +422,7 @@ static int proj_load(const char *root, flint_proj *pr, char *err, size_t ecap)
     }
 
     pr->stack = 65536;
-    pr->manual_ram = 1;
+    pr->mem = FLINT_MEM_MANUAL;
     pr->name[0] = 0;
     snprintf(pr->entry, sizeof pr->entry, "src/main.flt");
 
@@ -396,9 +452,22 @@ static int proj_load(const char *root, flint_proj *pr, char *err, size_t ecap)
                     snprintf(pr->entry, sizeof pr->entry, "%.100s", val);
                 } else if (strcmp(key, "stack") == 0) {
                     pr->stack = strtol(val, 0, 10);
+                } else if (strcmp(key, "memory") == 0) {
+                    if (flint_mem_mode_parse(val, &pr->mem) != 0) {
+                        snprintf(err, ecap, "Flint.toml: memory: want "
+                                 "\"auto\" or \"manual\", got \"%.64s\"",
+                                 val);
+                        free(src);
+                        return -1;
+                    }
                 } else if (strcmp(key, "use_hand_made_ram_control") == 0) {
-                    if (strcmp(val, "true") == 0)       pr->manual_ram = 1;
-                    else if (strcmp(val, "false") == 0) pr->manual_ram = 0;
+                    /* legacy v0.1 key (deprecated): true = manual control,
+                     * false = auto. If both this and `memory` appear, the
+                     * later line wins (single pass, file order). */
+                    if (strcmp(val, "true") == 0)
+                        pr->mem = FLINT_MEM_MANUAL;
+                    else if (strcmp(val, "false") == 0)
+                        pr->mem = FLINT_MEM_AUTO;
                     else {
                         snprintf(err, ecap, "Flint.toml: "
                                  "use_hand_made_ram_control: want true/false, got \"%.64s\"",
@@ -415,9 +484,9 @@ static int proj_load(const char *root, flint_proj *pr, char *err, size_t ecap)
     return 0;
 }
 
-/* resolve project root -> entry path + stack */
+/* resolve project root -> entry path + stack + memory model */
 static int open_project(const char *root, char *entry, size_t cap,
-                        uint32_t *stack, int *manual_ram,
+                        uint32_t *stack, flint_mem_mode *mem,
                         char *err, size_t ecap)
 {
     flint_proj pr;
@@ -428,40 +497,63 @@ static int open_project(const char *root, char *entry, size_t cap,
         return -1;
     }
     *stack = clamp_stack(pr.stack);
-    if (manual_ram) *manual_ram = pr.manual_ram;
+    if (mem) *mem = pr.mem;
     return 0;
 }
 
-static int has_flint_ext(const char *s)
+static int has_ext(const char *s, const char *ext4)
 {
     size_t n = strlen(s);
-    return n >= 4 && strcmp(s + (n - 4), ".flt") == 0;
+    return n >= 4 && strcmp(s + (n - 4), ext4) == 0;
 }
 
-int has_flint_ext_public(const char *s)
-{
-    return has_flint_ext(s);
-}
+static int has_flint_ext(const char *s) { return has_ext(s, ".flt"); }
+static int has_fbc_ext(const char *s)   { return has_ext(s, ".fbc"); }
+static int is_flint_file(const char *s) { return has_flint_ext(s) ||
+                                                 has_fbc_ext(s); }
+
+int has_flint_ext_public(const char *s) { return has_flint_ext(s); }
+int has_fbc_ext_public(const char *s)   { return has_fbc_ext(s); }
 
 int flint_cli_cmd_run(const char *arg)
 {
+    if (arg != 0 && has_fbc_ext(arg))
+        return flint_cli_run_image(arg);
     if (arg != 0 && has_flint_ext(arg))
-        return flint_cli_run_file(arg, 65536, 0, 1);   /* no project file */
+        return flint_cli_run_file(arg, 65536, 0, FLINT_MEM_MANUAL);
 
     const char *root = arg ? arg : ".";
     char entry[600], err[256];
     uint32_t stack;
-    int manual_ram = 1;
-    if (open_project(root, entry, sizeof entry, &stack, &manual_ram,
+    flint_mem_mode mem = FLINT_MEM_MANUAL;
+    if (open_project(root, entry, sizeof entry, &stack, &mem,
                      err, sizeof err) != 0) {
         fprintf(stderr, "flint: %s\n", err);
         return 2;
     }
-    return flint_cli_run_file(entry, stack, root, manual_ram);
+    return flint_cli_run_file(entry, stack, root, mem);
 }
 
 int flint_cli_cmd_check(const char *arg)
 {
+    if (arg != 0 && has_fbc_ext(arg)) {
+        struct stat st;
+        flint_prog p; flint_mem_mode mem = FLINT_MEM_MANUAL;
+        char err[384] = "";
+
+        if (stat(arg, &st) != 0) {
+            fprintf(stderr, "flint: %s: %s\n", arg, strerror(errno));
+            return 2;
+        }
+        if (flint_img_load(arg, &p, &mem, err, sizeof err) != 0) {
+            fprintf(stderr, "flint: %s\n", err);
+            return 1;
+        }
+        printf("flint: %s: ok, %u code bytes, %u mem bytes (memory = %s)\n",
+               arg, p.code_size, p.mem_size, flint_mem_mode_name(mem));
+        flint_prog_free(&p);
+        return 0;
+    }
     if (arg != 0 && has_flint_ext(arg))
         return flint_cli_check_file(arg, 0);
 
@@ -477,9 +569,22 @@ int flint_cli_cmd_check(const char *arg)
 
 int flint_cli_cmd_dis(const char *arg)
 {
-    if (arg == 0 || !has_flint_ext(arg)) {
-        fprintf(stderr, "flint dis: <file.flt> required\n");
+    if (arg == 0 || !is_flint_file(arg)) {
+        fprintf(stderr, "flint dis: <file.flt|file.fbc> required\n");
         return 2;
+    }
+
+    if (has_fbc_ext(arg)) {
+        flint_prog p; flint_mem_mode mem = FLINT_MEM_MANUAL;
+        char err[384] = "";
+        if (flint_img_load(arg, &p, &mem, err, sizeof err) != 0) {
+            fprintf(stderr, "flint: %s\n", err);
+            return 1;
+        }
+        printf("; %u code bytes, entry 0x%04X\n", p.code_size, p.entry);
+        int rc = flint_dis(p.code, p.code_size);
+        flint_prog_free(&p);
+        return rc;
     }
 
     long len;
@@ -505,28 +610,220 @@ int flint_cli_cmd_dis(const char *arg)
     return rc;
 }
 
+/* ---------------- name helpers ---------------- */
+
+/* leaf name of a path (trailing slashes ignored); "." / ".." / empty
+ * collapse to "flint-project" */
+static void leaf_name(const char *path, char *out, size_t cap)
+{
+    const char *b = path + strlen(path);
+    const char *s;
+    size_t bl;
+
+    while (b > path && b[-1] == '/') b--;
+    s = b;
+    while (s > path && s[-1] != '/') s--;
+    bl = (size_t)(b - s);
+    if (bl == 0 || (bl == 1 && s[0] == '.') ||
+        (bl == 2 && s[0] == '.' && s[1] == '.'))
+        snprintf(out, cap, "flint-project");
+    else
+        snprintf(out, cap, "%.*s",
+                 (int)(bl > cap - 1 ? cap - 1 : bl), s);
+}
+
+/* leaf name with a trailing .flt/.fbc dropped */
+static void source_stem(const char *path, char *out, size_t cap)
+{
+    size_t n;
+
+    leaf_name(path, out, cap);
+    n = strlen(out);
+    if (n > 4 && (strcmp(out + n - 4, ".flt") == 0 ||
+                  strcmp(out + n - 4, ".fbc") == 0))
+        out[n - 4] = 0;
+}
+
+/* ---------------- `flint build` ---------------- */
+
+/* assemble <file.flt|dir> into one self-contained .fbc image; includes
+ * are resolved here, so the image needs no sources at run time */
+int flint_cli_cmd_build(const char *arg, const char *outarg)
+{
+    int from_file = (arg != 0 && is_flint_file(arg));
+    const char *root = arg ? arg : ".";
+    char src_path[600], name[128], out[700];
+    uint32_t stack = 65536;
+    flint_mem_mode mem = FLINT_MEM_MANUAL;
+
+    if (arg != 0 && has_fbc_ext(arg)) {
+        fprintf(stderr, "flint build: %s is already a bytecode image\n", arg);
+        return 2;
+    }
+
+    if (from_file) {
+        if (snprintf(src_path, sizeof src_path, "%s", arg) >=
+            (int)sizeof src_path) {
+            fprintf(stderr, "flint build: path too long\n");
+            return 2;
+        }
+        source_stem(arg, name, sizeof name);
+    } else {
+        flint_proj pr;
+        char err[256];
+        if (proj_load(root, &pr, err, sizeof err) != 0) {
+            fprintf(stderr, "flint: %s\n", err);
+            return 2;
+        }
+        if (snprintf(src_path, sizeof src_path, "%.380s/%.100s",
+                     root, pr.entry) >= (int)sizeof src_path) {
+            fprintf(stderr, "flint build: entry path too long\n");
+            return 2;
+        }
+        stack = clamp_stack(pr.stack);
+        mem = pr.mem;
+        if (pr.name[0] != 0)
+            snprintf(name, sizeof name, "%.100s", pr.name);
+        else
+            leaf_name(root, name, sizeof name);
+    }
+
+    long len;
+    char *src = read_whole(src_path, &len);
+    if (!src) {
+        fprintf(stderr, "flint: %s: %s\n", src_path, strerror(errno));
+        return 2;
+    }
+
+    flint_prog p; char err[384] = "";
+    inc_ctx ic; inc_ctx_init(&ic, from_file ? 0 : root);
+    int rc = flint_assemble_ctx(src, src_path, inc_load, &ic, &p, stack,
+                                err, sizeof(err));
+    free(src);
+    inc_ctx_free(&ic);
+    if (rc != 0) {
+        fprintf(stderr, "flint: %s\n", err);
+        return 1;
+    }
+
+    if (outarg != 0) {
+        if (snprintf(out, sizeof out, "%s", outarg) >= (int)sizeof out) {
+            fprintf(stderr, "flint build: output path too long\n");
+            flint_prog_free(&p);
+            return 2;
+        }
+    } else {
+        if (mkdir("build", 0777) != 0 && errno != EEXIST) {
+            fprintf(stderr, "flint build: cannot create build/: %s\n",
+                    strerror(errno));
+            flint_prog_free(&p);
+            return 2;
+        }
+        if (snprintf(out, sizeof out, "build/%.100s.fbc", name) >=
+            (int)sizeof out) {
+            fprintf(stderr, "flint build: output path too long\n");
+            flint_prog_free(&p);
+            return 2;
+        }
+    }
+
+    if (flint_img_save(out, &p, mem, err, sizeof err) != 0) {
+        fprintf(stderr, "flint: %s\n", err);
+        flint_prog_free(&p);
+        return 2;
+    }
+    printf("flint: built %s (%u code bytes, %u mem bytes, memory = %s)\n",
+           out, p.code_size, p.mem_size, flint_mem_mode_name(mem));
+    flint_prog_free(&p);
+    return 0;
+}
+
 /* ---------------- `flint new` ---------------- */
 
-static const char *NEW_MAIN =
-    "// %s — FLINT starter project\n"
+/* starter programs, one per memory model (Flint.toml `memory`):
+ *   manual — the program takes its own blocks with `alloc`
+ *   auto   — locals live in `enter`/`leave` frames
+ * Both print "hello, world" and exit 0. */
+
+static const char *NEW_MAIN_MANUAL =
+    "// %s — FLINT starter project (memory = \"manual\")\n"
+    "//\n"
+    "// Manual memory: `alloc` takes a block from the bump arena and the\n"
+    "// program owns it — later `return`s never invalidate the block.\n"
     "\n"
     "data:\n"
-    "hi: str \"hello, world\", 10, 0\n"
+    "msg: str \"hello, world\", 10, 0\n"
     "\n"
     "code:\n"
     "main:\n"
-    "    set r2, hi\n"
-    ".print:\n"
-    "    load.byte r0, [r2]\n"
-    "    jump.eq r0, 0, .done\n"
-    "    sys 1                    // SYS 1 = putc(r0)\n"
+    "    alloc r1, 16             // scratch block; r1 = its address\n"
+    "    set r2, msg              // r2 walks the message\n"
+    "    copy r3, r1              // r3 walks the block\n"
+    ".copy:\n"
+    "    load.byte r4, [r2]\n"
+    "    store.byte [r3], r4\n"
+    "    jump.eq r4, .print       // NUL copied: done\n"
     "    inc r2\n"
-    "    jump .print\n"
-    ".done:\n"
-    "    set r0, 0                // clean exit code\n"
+    "    inc r3\n"
+    "    jump .copy\n"
+    ".print:\n"
+    "    set r2, 13               // message + newline (the NUL stays)\n"
+    "    sys 0                    // print span [r1, r1+r2)\n"
+    "    set r0, 0\n"
     "    exit\n";
 
-int flint_cli_cmd_new(const char *dirarg)
+static const char *NEW_MAIN_AUTO =
+    "// %s — FLINT starter project (memory = \"auto\")\n"
+    "//\n"
+    "// Automatic memory: locals live in `enter`/`leave` frames — the\n"
+    "// frame is reserved on entry and released on `leave`.\n"
+    "\n"
+    "data:\n"
+    "msg: str \"hello, world\", 10, 0\n"
+    "\n"
+    "code:\n"
+    "main:\n"
+    "    set r1, 4\n"
+    "    set r2, 9\n"
+    "    call add_two             // r0 = 13; args r1/r2, result r0\n"
+    "    set r1, msg\n"
+    "    copy r2, r0              // print length = message + newline\n"
+    "    sys 0                    // print span [r1, r1+r2)\n"
+    "    set r0, 0\n"
+    "    exit\n"
+    "\n"
+    "add_two:\n"
+    "    enter 16                 // local slots [fp-8] and [fp-16]\n"
+    "    store [fp-8], r1\n"
+    "    store [fp-16], r2\n"
+    "    load r0, [fp-8]\n"
+    "    load r3, [fp-16]\n"
+    "    add r0, r0, r3\n"
+    "    leave                    // frame released here\n"
+    "    return\n";
+
+/* ask for the memory model on stdin; EOF or a blank line takes the
+ * default (manual), anything else that is not auto/manual re-asks */
+static flint_mem_mode prompt_memory_mode(void)
+{
+    char buf[16];
+
+    for (;;) {
+        flint_mem_mode m;
+        int i = 0;
+
+        printf("Choose memory model [auto/manual] (default: manual): ");
+        fflush(stdout);
+        if (!fgets(buf, sizeof buf, stdin)) return FLINT_MEM_MANUAL;
+        while (buf[i] == ' ' || buf[i] == '\t') i++;
+        if (buf[i] == 0 || buf[i] == '\n' || buf[i] == '\r')
+            return FLINT_MEM_MANUAL;
+        if (flint_mem_mode_parse(buf, &m) == 0) return m;
+        printf("please answer 'auto' or 'manual'\n");
+    }
+}
+
+int flint_cli_cmd_new(const char *dirarg, flint_mem_mode mem, int mem_given)
 {
     const char *dir = dirarg ? dirarg : ".";
     struct stat st;
@@ -540,6 +837,9 @@ int flint_cli_cmd_new(const char *dirarg)
         return 1;
     }
 
+    /* no --memory: ask before any directory exists on disk */
+    if (!mem_given) mem = prompt_memory_mode();
+
     if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
         fprintf(stderr, "flint: cannot create %s: %s\n", dir, strerror(errno));
         return 2;
@@ -552,15 +852,7 @@ int flint_cli_cmd_new(const char *dirarg)
     }
 
     char name[64];
-    const char *b = dir + strlen(dir);
-    while (b > dir && b[-1] == '/') b--;
-    const char *s = b;
-    while (s > dir && s[-1] != '/') s--;
-    size_t bl = (size_t)(b - s);
-    if (bl == 0 || strcmp(s, ".") == 0 || strcmp(s, "..") == 0)
-        snprintf(name, sizeof name, "flint-project");
-    else
-        snprintf(name, sizeof name, "%.*s", (int)(bl > 63 ? 63 : bl), s);
+    leaf_name(dir, name, sizeof name);
 
     FILE *f = fopen(toml, "w");
     if (!f) {
@@ -572,8 +864,8 @@ int flint_cli_cmd_new(const char *dirarg)
         "name = \"%s\"\n"
         "entry = \"src/main.flt\"\n"
         "stack = 65536\n"
-        "use_hand_made_ram_control = true\n",
-        name);
+        "memory = \"%s\"\n",
+        name, flint_mem_mode_name(mem));
     fclose(f);
 
     char entry[600];
@@ -583,12 +875,13 @@ int flint_cli_cmd_new(const char *dirarg)
         fprintf(stderr, "flint: cannot write %s: %s\n", entry, strerror(errno));
         return 2;
     }
-    fprintf(f, NEW_MAIN, name);
+    fprintf(f, mem == FLINT_MEM_AUTO ? NEW_MAIN_AUTO : NEW_MAIN_MANUAL, name);
     fclose(f);
 
     printf("created %s\n", dir);
-    printf("  Flint.toml\n");
+    printf("  Flint.toml      (memory = \"%s\")\n", flint_mem_mode_name(mem));
     printf("  src/main.flt\n");
     printf("next: flint run %s\n", dir);
+    printf("  or: flint build %s\n", dir);
     return 0;
 }

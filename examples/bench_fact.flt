@@ -1,0 +1,43 @@
+// bench_fact — timing workload: fib(33) computed recursively.
+// Single-file form of the examples/bench_fact project.
+// Prints "bench_fact: ok" (r0 = 0) or "bench_fact: FAIL" (r0 = 1).
+
+data:
+msg_ok:   str "bench_fact: ok", 10, 0
+msg_fail: str "bench_fact: FAIL", 10, 0
+
+code:
+main:
+    set r1, 33
+    call fib
+    jump.ne r0, 3524578, .fail
+    set r1, msg_ok
+    set r2, 15                  // "bench_fact: ok" + newline
+    sys 0                       // print span [r1, r1+r2)
+    set r0, 0
+    exit
+.fail:
+    set r1, msg_fail
+    set r2, 17                  // "bench_fact: FAIL" + newline
+    sys 0
+    set r0, 1
+    exit
+
+// fib(n): r1 = n -> r0 = fib(n); exponential recursion on purpose
+fib:
+    jump.lt r1, 2, .base
+    push r1                     // [n]
+    dec r1
+    call fib                    // r0 = fib(n-1)
+    push r0                     // [n, f1]
+    pop r2                      // r2 = f1
+    pop r1                      // r1 = n
+    push r2                     // [f1] — f1 must survive the next call
+    sub r1, r1, 2
+    call fib                    // r0 = fib(n-2)
+    pop r2                      // r2 = f1
+    add r0, r0, r2
+    return
+.base:
+    copy r0, r1
+    return

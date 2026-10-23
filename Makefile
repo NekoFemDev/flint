@@ -1,7 +1,7 @@
 # flint — build script (cargo-style targets, zero dependencies)
 CC      ?= cc
 CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -I include
-SRC       = src/flint_core.c src/flint_asm.c src/flint_cli.c
+SRC       = src/flint_core.c src/flint_asm.c src/flint_cli.c src/flint_img.c
 TESTSRC   = src/flint_core.c src/flint_asm.c
 
 BIN       = build/flint
@@ -9,7 +9,7 @@ TESTS     = build/test_core build/test_asm build/test_heap
 
 all: $(BIN)
 
-$(BIN): $(SRC) src/main.c src/flint_dis.c include/flint.h include/flint_cli.h
+$(BIN): $(SRC) src/main.c src/flint_dis.c include/flint.h include/flint_cli.h include/flint_img.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(SRC) src/flint_dis.c src/main.c -o $@
 
@@ -43,7 +43,10 @@ test: $(TESTS) $(BIN)
 	  && ./$(BIN) tests/mem.flt   | grep -q "flint"
 	@echo "examples: 9/9 programs run"
 
+bench: $(BIN)
+	@sh tests/bench.sh
+
 clean:
 	rm -rf build
 
-.PHONY: all test clean
+.PHONY: all test bench clean

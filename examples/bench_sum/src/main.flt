@@ -1,0 +1,31 @@
+// bench_sum — project form of the same workload as examples/bench_sum.flt:
+// sum 1..40,000,000 and verify the total.
+// Build it with:  flint build examples/bench_sum
+// Then run the image:  flint run build/bench_sum.fbc
+
+data:
+msg_ok:   str "bench_sum: ok", 10, 0
+msg_fail: str "bench_sum: FAIL", 10, 0
+
+code:
+main:
+    set r1, 0                   // i
+    set r2, 0                   // sum
+    set r3, 40000000            // N
+    set r4, 800000020000000     // N*(N+1)/2 — the expected total
+.loop:
+    inc r1
+    add r2, r2, r1
+    jump.lt r1, r3, .loop
+    jump.ne r2, r4, .fail
+    set r1, msg_ok
+    set r2, 14                  // "bench_sum: ok" + newline
+    sys 0                       // print span [r1, r1+r2)
+    set r0, 0
+    exit
+.fail:
+    set r1, msg_fail
+    set r2, 16                  // "bench_sum: FAIL" + newline
+    sys 0
+    set r0, 1
+    exit

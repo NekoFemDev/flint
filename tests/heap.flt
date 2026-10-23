@@ -4,9 +4,10 @@
 // 'alloc rd, n' returns the block address in rd and moves the cursor up
 // by n; 'free' is a validated no-op. Since v0.2.0 'return' never rewinds
 // the cursor, in either RAM mode: a callee's block stays valid after the
-// caller regains control (returning an array is safe). The old auto /
-// arena mode is gone; Flint.toml use_hand_made_ram_control is accepted
-// for compatibility but no longer changes behaviour.
+// caller regains control (returning an array is safe). The Flint.toml
+// `memory = "manual"|"auto"` key picks the starter style only and is
+// informational at run time; the legacy use_hand_made_ram_control key is
+// still accepted.
 //
 // The program checks cursor arithmetic, free-as-no-op, and that a
 // callee allocation persists across the return:

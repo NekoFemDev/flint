@@ -1,0 +1,22 @@
+// fib(n): r1 = n -> r0 = fib(n); exponential recursion on purpose.
+// Library file of the bench_fact project; bundled into the .fbc image
+// by `flint build` (no source needed at run time).
+
+code:
+fib:
+    jump.lt r1, 2, .base
+    push r1                     // [n]
+    dec r1
+    call fib                    // r0 = fib(n-1)
+    push r0                     // [n, f1]
+    pop r2                      // r2 = f1
+    pop r1                      // r1 = n
+    push r2                     // [f1] — f1 must survive the next call
+    sub r1, r1, 2
+    call fib                    // r0 = fib(n-2)
+    pop r2                      // r2 = f1
+    add r0, r0, r2
+    return
+.base:
+    copy r0, r1
+    return

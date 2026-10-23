@@ -157,7 +157,7 @@ void flint_init(flint_vm *vm,
     vm->pc = 0;         vm->sp = mem_size;
     vm->fp = (flint_word)mem_size;     /* no frame yet */
     vm->heap_ptr = 0;   vm->heap_start = 0;
-    vm->use_manual_ram = 1;            /* compatibility field (unused) */
+    vm->mem_mode = FLINT_MEM_MANUAL;   /* informational (flint_mem_mode) */
     vm->steps = 0;      vm->max_steps = 0;
     vm->halted = 0;
     vm->err = FLINT_OK; vm->err_text = 0;
@@ -173,15 +173,16 @@ void flint_sys_set(flint_vm *vm, int slot, flint_syscall fn)
     vm->sys[slot] = fn;
 }
 
-void flint_heap_set(flint_vm *vm, uint32_t heap_start, int use_manual_ram)
+void flint_heap_set(flint_vm *vm, uint32_t heap_start, flint_mem_mode mode)
 {
     /* the host picks the start (the CLI passes the assembler's aligned
      * data end); a start past the image would only make the first alloc
      * trap, so clamp instead of storing an impossible cursor */
     if (heap_start > vm->mem_size) heap_start = vm->mem_size;
-    vm->heap_start     = heap_start;
-    vm->heap_ptr       = heap_start;
-    vm->use_manual_ram = use_manual_ram ? 1 : 0;
+    vm->heap_start = heap_start;
+    vm->heap_ptr   = heap_start;
+    /* normalize: the field always holds a valid mode */
+    vm->mem_mode = (mode == FLINT_MEM_AUTO) ? FLINT_MEM_AUTO : FLINT_MEM_MANUAL;
 }
 
 int flint_step(flint_vm *vm)

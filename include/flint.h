@@ -61,8 +61,9 @@
  *
  * RAM control: OP_ALLOC is a bump allocator. Since v0.2.0 a RETURN never
  * rewinds the cursor — an allocated block stays valid after the function
- * that allocated it returns (returning an array is safe). use_manual_ram
- * is retained for source/ABI compatibility and is informational only.
+ * that allocated it returns (returning an array is safe). The project
+ * memory model (Flint.toml `memory`, flint_mem_mode) is informational:
+ * it picks how a program manages storage, not runtime behavior.
  */
 #ifndef FLINT_H
 #define FLINT_H
@@ -72,7 +73,7 @@
 extern "C" {
 #endif
 
-#define FLINT_VERSION  "0.2.0-pre.1"
+#define FLINT_VERSION  "0.2.0-pre.2"
 #define FLINT_NREGS    16
 #define FLINT_MAX_SYS  64
 /* pseudo-register used in address-base fields; never a general register */
@@ -101,6 +102,20 @@ enum {
                                  r0 = bytes written or -1             */
     FLINT_SYS_CLOSE     = 6   /* r0 = fd; r0 = 0 or -1                */
 };
+
+/* memory model — how a program manages its storage (Flint.toml `memory`).
+ * FLINT_MEM_MANUAL: the program calls `alloc` and owns its blocks
+ *                   (bump-allocator arena; `free` is a validated no-op
+ *                   for now);
+ * FLINT_MEM_AUTO:   locals live in `enter`/`leave` frames — the VM
+ *                   reserves a frame on entry and releases it on leave.
+ * The mode travels with the VM for hosts/tools and picks the `flint new`
+ * starter; it does not change interpreter semantics (since v0.2.0 RETURN
+ * never rewinds the heap cursor in either mode). */
+typedef enum {
+    FLINT_MEM_MANUAL = 0,
+    FLINT_MEM_AUTO   = 1
+} flint_mem_mode;
 
 typedef struct flint_vm flint_vm;
 typedef void (*flint_syscall)(flint_vm *vm);
@@ -156,9 +171,7 @@ struct flint_vm {
     flint_word   fp;           /* frame pointer: [sp, fp) is the local area */
     uint32_t     heap_ptr;     /* bump-allocator cursor (OP_ALLOC) */
     uint32_t     heap_start;   /* bottom of the heap arena */
-    int          use_manual_ram; /* deprecated: RET no longer rewinds the
-                                    heap cursor in either mode; kept for
-                                    source/ABI compatibility */
+    flint_mem_mode mem_mode;   /* manual / auto (flint_mem_mode); informational */
     uint32_t     steps;
     uint32_t     max_steps;    /* 0 = unlimited */
     uint8_t      halted;
@@ -178,9 +191,9 @@ void  flint_init(flint_vm *vm,
 void  flint_sys_set(flint_vm *vm, int slot, flint_syscall fn);
 /* heap configuration, call after flint_init. heap_start = first
  * allocatable offset (the CLI passes flint_prog.heap_start, the aligned
- * end of the data image); host-built images pick their own. use_manual_ram
- * is retained for compatibility and no longer changes RETURN behaviour. */
-void  flint_heap_set(flint_vm *vm, uint32_t heap_start, int use_manual_ram);
+ * end of the data image); host-built images pick their own. mode records
+ * the project memory model; it no longer changes RETURN behaviour. */
+void  flint_heap_set(flint_vm *vm, uint32_t heap_start, flint_mem_mode mode);
 
 /* execution: returns r[0] at HLT; negative values = -FLINT_ERR_* */
 flint_word  flint_run(flint_vm *vm, uint32_t entry);

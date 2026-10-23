@@ -1,4 +1,4 @@
-# FLINT 0.2.0-pre.1
+# FLINT 0.2.0-pre.2
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.
@@ -9,6 +9,7 @@ vm core:       ~55 opcodes, word = int64, 16 registers, flat memory
 embed core:    include/flint.h + src/flint_core.c   (zero libc)
                + src/flint_asm.c                    (only if asm→bytecode is needed)
 executable:    + src/flint_cli.c + src/main.c       (CLI host: stdio + POSIX file syscalls)
+               + src/flint_img.c                    (host-side: .fbc image container)
 ```
 
 ---
@@ -48,16 +49,17 @@ right before `exit`.
 ## CLI
 
 ```
-flint new <dir>          scaffold a project: Flint.toml + src/main.flt
-flint run <file.flt>     run a single file
-flint run [dir]          run a project (default: current directory)
-flint check <file.flt>   assemble without executing (syntax gate)
-flint check [dir]        check a project
-flint dis <file.flt>     assemble and print bytecode disassembly
+flint new <dir> [--memory auto|manual]   scaffold a project (prompts if omitted)
+flint build <file.flt|dir> [-o out.fbc]  assemble into one .fbc image
+flint run <file.flt|file.fbc>            run a source file or a built image
+flint run [dir]                          run a project (default: current directory)
+flint check <file.flt|file.fbc>          assemble/validate without executing
+flint check [dir]                        check a project
+flint dis <file.flt|file.fbc>            print bytecode disassembly
 flint --version
 ```
 
-Shortcut: `flint path/file.flt` ≡ `flint run path/file.flt`.
+Shortcut: `flint path/file.flt` ≡ `flint run path/file.flt` (same for `.fbc`).
 
 CLI exit codes:
 
@@ -69,7 +71,8 @@ CLI exit codes:
 | 1    | assembly error (source line and reason go to stderr) |
 | 2    | file/project could not be read                      |
 
-`check` prints `flint: <file>: ok, <N> code bytes` on success.
+`check` prints `flint: <file>: ok, <N> code bytes` on success (`check` of
+a `.fbc` image also reports the mem size and memory model).
 
 `dis` assembles and prints the bytecode back as text — sugar resolves into
 its emitted form (expert names, absolute targets), so a branch can 
@@ -84,11 +87,47 @@ $ flint dis demo/src/main.flt
 ...
 ```
 
+### Bytecode images (.fbc)
+
+`flint build` resolves `include`s, assembles the program and packs the
+result into one binary — the only artifact needed to run it:
+
+```
+$ flint build examples/bench_fact
+flint: built build/bench_fact.fbc (173 code bytes, 65584 mem bytes, memory = auto)
+$ flint run build/bench_fact.fbc
+bench_fact: ok
+```
+
+Default output is `build/<name>.fbc` (`<name>` from Flint.toml, or the
+file stem for a single-file build); `-o` picks another path. The image is
+self-contained: no assembler, no sources, no `Flint.toml` at run time.
+The container is versioned and checksummed (FNV-1a 32 over the code
+bytes, then the mem bytes); the loader rejects wrong versions, truncated
+payloads, trailing data and checksum mismatches. Header layout, all
+fields little-endian u32:
+
+| Offset | Field                              |
+|--------|------------------------------------|
+| 0      | magic `"FLBC"`                     |
+| 4      | version (1)                        |
+| 8      | code_size                          |
+| 12     | mem_size                           |
+| 16     | entry (main's code offset)         |
+| 20     | heap_start                         |
+| 24     | mem_mode (0 manual / 1 auto)       |
+| 28     | checksum (FNV-1a over code, mem)   |
+| 32     | code image, then mem image         |
+
+Embedding hosts can read/write images with `include/flint_img.h`
+(`flint_img_save` / `flint_img_load`, 0/-1 with an error string).
+
 ---
 
 ## Project (Flint.toml)
 
-`flint new demo` creates:
+`flint new demo` (add `--memory auto|manual`, or answer the prompt)
+creates:
 
 ```
 demo/
@@ -101,7 +140,7 @@ demo/
 name = "demo"
 entry = "src/main.flt"
 stack = 65536
-use_hand_made_ram_control = true
+memory = "manual"
 ```
 
 Supported TOML subset: `# comments`, sections `[...]`, `key = value`;
@@ -112,11 +151,15 @@ string values are quoted. Keys:
 | `name` | directory name   | plain project name                        |
 | `entry`| `src/main.flt` | path to the main program (relative to project root) |
 | `stack`| `65536`          | extra memory bytes reserved for the stack |
-| `use_hand_made_ram_control` | `true` | accepted for compatibility; ignored since v0.2.0 (`return` never rewinds the heap cursor) |
+| `memory` | `"manual"`     | memory model: `"manual"` (`alloc`-driven) or `"auto"` (`enter`/`leave` frames); picks the starter `flint new` writes, informational at run time (`return` never rewinds the heap cursor) |
+
+The legacy v0.1 key `use_hand_made_ram_control` is still accepted
+(`true` = manual, `false` = auto); if both keys appear, the later line
+wins.
 
 Run from inside a project directory: `flint run` (no arguments).
 Single-file runs (`flint run file.flt`) have no project file and use the
-default RAM mode (`true`; the key is informational only in v0.2.0).
+default memory model (`manual`; informational at run time).
 
 ---
 
@@ -335,9 +378,11 @@ free r1             // validated no-op today
 
 Since v0.2.0 `return` never rewinds the cursor: an allocation made by a
 callee remains valid after the caller regains control, so returning an
-allocated array from a function is safe. The old `Flint.toml`
-`use_hand_made_ram_control` key is accepted for compatibility but no
-longer changes behaviour.
+allocated array from a function is safe. The `Flint.toml` `memory` key
+(`"manual"` / `"auto"`) selects the starter style `flint new` writes —
+`alloc`-driven or `enter`/`leave` frames — and is informational at run
+time; the legacy v0.1 key `use_hand_made_ram_control` is accepted for
+compatibility.
 
 `free` is deliberately a validated no-op: real reclaim needs per-block
 size metadata (planned upgrade: a size word at `rd-8`, LIFO reclaim).
@@ -450,6 +495,7 @@ const char *txt = vm.err_text;         /* human-readable line */
 ```
 make          # build/flint
 make test     # full bench: core + asm + heap + examples
+make bench    # build the bench examples + compare run speeds
 make clean
 ```
 
@@ -472,4 +518,15 @@ tests/mem.flt     flint                               (s_memset/s_memcpy via .in
 tests/heap.flt    heap mode: manual + heap ok         (alloc/free + persistent allocations)
 ```
 
+Benchmark examples (project form + single-file form of each):
+
+```
+examples/bench_sum.flt   bench_sum: ok     (sum 1..40,000,000; ~1.1s)
+examples/bench_sum/      same program as a project (Flint.toml + src/main.flt)
+examples/bench_fact.flt  bench_fact: ok    (recursive fib(33); ~1.0s)
+examples/bench_fact/     project form, fib in lib/fib.flt (bundled by `build`)
+```
+
 Run one: `flint run tests/sum.flt` — or all of them: `make test`.
+`make bench` builds both examples with `flint build` and compares
+project / single-file / `.fbc` run times (`sh tests/bench.sh [reps]`).

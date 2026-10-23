@@ -1,0 +1,25 @@
+// bench_fact — project form: main here, the recursive fib helper in
+// lib/fib.flt. `flint build examples/bench_fact` bundles both into one
+// self-contained image.
+.include "fib.flt"
+
+data:
+msg_ok:   str "bench_fact: ok", 10, 0
+msg_fail: str "bench_fact: FAIL", 10, 0
+
+code:
+main:
+    set r1, 33
+    call fib
+    jump.ne r0, 3524578, .fail
+    set r1, msg_ok
+    set r2, 15                  // "bench_fact: ok" + newline
+    sys 0                       // print span [r1, r1+r2)
+    set r0, 0
+    exit
+.fail:
+    set r1, msg_fail
+    set r2, 17                  // "bench_fact: FAIL" + newline
+    sys 0
+    set r0, 1
+    exit

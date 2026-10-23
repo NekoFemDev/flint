@@ -1,0 +1,5 @@
+[project]
+name = "bench_sum"
+entry = "src/main.flt"
+stack = 65536
+memory = "manual"

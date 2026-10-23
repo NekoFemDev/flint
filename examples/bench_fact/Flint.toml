@@ -1,0 +1,5 @@
+[project]
+name = "bench_fact"
+entry = "src/main.flt"
+stack = 65536
+memory = "auto"

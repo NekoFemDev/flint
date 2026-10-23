@@ -5,8 +5,8 @@
  * OP_FREE validates its operand and does nothing. Since v0.2.0 a RET
  * never rewinds the cursor: an allocation made by a callee remains
  * valid after the caller regains control, so returning an array is
- * safe. use_manual_ram is retained for API compatibility and both
- * values must now behave identically (persistent).
+ * safe. flint_mem_mode (manual/auto) is informational and both modes
+ * must now behave identically (persistent).
  */
 #include <stdio.h>
 #include <string.h>
@@ -18,7 +18,8 @@ static int fails = 0;
          else     { printf("FAIL  %s\n", (msg)); fails++; } } while (0)
 
 /* assemble + run the same program in the requested mode */
-static void rmode(const char *src, int manual, flint_vm *vm, flint_word *rc)
+static void rmode(const char *src, flint_mem_mode mode,
+                  flint_vm *vm, flint_word *rc)
 {
     flint_prog p; char err[256] = "";
     if (flint_assemble(src, &p, 4096, err, sizeof err) != 0) {
@@ -28,7 +29,7 @@ static void rmode(const char *src, int manual, flint_vm *vm, flint_word *rc)
         return;
     }
     flint_init(vm, p.code, p.code_size, p.mem, p.mem_size);
-    flint_heap_set(vm, p.heap_start, manual);
+    flint_heap_set(vm, p.heap_start, mode);
     *rc = flint_run(vm, p.entry);
     flint_prog_free(&p);
 }
@@ -53,18 +54,18 @@ static void t_basic(void)
     flint_vm vm; flint_word rc;
     flint_word base;
 
-    rmode(S_basic, 1, &vm, &rc);
+    rmode(S_basic, FLINT_MEM_MANUAL, &vm, &rc);
     CHECK(vm.err == FLINT_OK, "manual: run clean");
     base = (flint_word)vm.heap_start;
     CHECK(vm.r[2] == base,                     "manual: first alloc at heap_start");
     CHECK(rc == base + 32 + 16,                "manual: helper's block still counted");
     CHECK(vm.heap_ptr == base + 32 + 16 + 32,  "manual: cursor not rewound by RET");
 
-    rmode(S_basic, 0, &vm, &rc);
-    CHECK(vm.err == FLINT_OK, "compat mode 0: run clean");
-    CHECK(vm.r[2] == base,                         "compat mode 0: first alloc at heap_start");
-    CHECK(rc == base + 32 + 16,                    "compat mode 0: helper's block persists");
-    CHECK(vm.heap_ptr == base + 32 + 16 + 32,      "compat mode 0: RET never rewinds");
+    rmode(S_basic, FLINT_MEM_AUTO, &vm, &rc);
+    CHECK(vm.err == FLINT_OK, "auto: run clean");
+    CHECK(vm.r[2] == base,                         "auto: first alloc at heap_start");
+    CHECK(rc == base + 32 + 16,                    "auto: helper's block persists");
+    CHECK(vm.heap_ptr == base + 32 + 16 + 32,      "auto: RET never rewinds");
 }
 
 static const char *S_nested =
@@ -87,16 +88,16 @@ static void t_nested(void)
     flint_vm vm; flint_word rc;
     flint_word base;
 
-    rmode(S_nested, 1, &vm, &rc);
+    rmode(S_nested, FLINT_MEM_MANUAL, &vm, &rc);
     CHECK(vm.err == FLINT_OK, "manual nested: run clean");
     base = (flint_word)vm.heap_start;
     CHECK(rc == base + 32 + 8 + 8 && vm.heap_ptr == base + 80,
           "manual nested: f and g blocks persist");
 
-    rmode(S_nested, 0, &vm, &rc);
-    CHECK(vm.err == FLINT_OK, "compat nested: run clean");
+    rmode(S_nested, FLINT_MEM_AUTO, &vm, &rc);
+    CHECK(vm.err == FLINT_OK, "auto nested: run clean");
     CHECK(rc == base + 32 + 8 + 8 && vm.heap_ptr == base + 80,
-          "compat nested: both callee blocks persist");
+          "auto nested: both callee blocks persist");
 }
 
 static const char *S_ret_array =
@@ -118,22 +119,22 @@ static void t_return_array(void)
     flint_vm vm; flint_word rc;
 
     /* the audit fix: a pointer returned by a callee must not dangle */
-    rmode(S_ret_array, 1, &vm, &rc);
+    rmode(S_ret_array, FLINT_MEM_MANUAL, &vm, &rc);
     CHECK(vm.err == FLINT_OK && rc == 42,
           "returned allocation stays valid (manual)");
-    rmode(S_ret_array, 0, &vm, &rc);
+    rmode(S_ret_array, FLINT_MEM_AUTO, &vm, &rc);
     CHECK(vm.err == FLINT_OK && rc == 42,
-          "returned allocation stays valid (compat)");
+          "returned allocation stays valid (auto)");
 }
 
 static void t_trap(void)
 {
     flint_vm vm; flint_word rc;
 
-    rmode("code:\nmain:\n    alloc r0, 1000000\n    exit\n", 1, &vm, &rc);
+    rmode("code:\nmain:\n    alloc r0, 1000000\n    exit\n", FLINT_MEM_MANUAL, &vm, &rc);
     CHECK(vm.err == FLINT_ERR_BADMEM, "alloc past the stack pointer traps");
 
-    rmode("code:\nmain:\n    alloc r0, -8\n    exit\n", 1, &vm, &rc);
+    rmode("code:\nmain:\n    alloc r0, -8\n    exit\n", FLINT_MEM_MANUAL, &vm, &rc);
     CHECK(vm.err == FLINT_ERR_BADMEM, "negative alloc size traps");
 }
 
@@ -144,7 +145,7 @@ static void t_badfree(void)
     flint_vm vm;
 
     flint_init(&vm, code, sizeof code, mem, sizeof mem);
-    flint_heap_set(&vm, 16, 1);
+    flint_heap_set(&vm, 16, FLINT_MEM_MANUAL);
     flint_run(&vm, 0);
     CHECK(vm.err == FLINT_ERR_BADREG, "free r16 (hand-encoded) traps BADREG");
 }
