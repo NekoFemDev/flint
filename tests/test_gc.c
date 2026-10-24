@@ -502,6 +502,35 @@ static void t_escape_program(void)
           "escaped block plus the later allocation stay live (64)");
 }
 
+/* ---- program-level: stack must not cross into the managed heap ---- */
+
+static const char *S_stack_guard =
+"code:\n"
+"main:\n"
+"    alloc r1, 3504\n"                /* heap_ptr = 3520, sp = 4096 */
+"    set r2, 0\n"
+"    set r3, 100\n"                   /* 100 pushes cross the frontier */
+"loop:\n"
+"    push r2\n"
+"    inc r2\n"
+"    jump.lt r2, r3, loop\n"
+"    exit\n";
+
+static void t_stack_guard_program(void)
+{
+    flint_vm vm; flint_word rc;
+    flint_gc_stats gs;
+
+    if (!run_auto(S_stack_guard, 0, &vm, &rc)) return;
+    CHECK(vm.err == FLINT_ERR_STACK,
+          "auto: push traps at heap_ptr instead of corrupting a header");
+    flint_gc_get_stats(&vm, &gs);
+    CHECK(gs.bytes_live == 3504 && vm.heap_ptr == 3520,
+          "auto: stack guard leaves the managed heap intact");
+    CHECK(m32(vm.mem, 12) == FLINT_GC_MAGIC,
+          "auto: managed block header magic is still intact");
+}
+
 /* ---- program-level: cycle + `gc` opcode ---- */
 
 static const char *S_gccycle =
@@ -632,6 +661,7 @@ int main(void)
     t_markstack_overflow();
     t_no_unbounded();
     t_escape_program();
+    t_stack_guard_program();
     t_gc_program();
     t_stress_program();
     t_manual();

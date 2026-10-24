@@ -1,8 +1,10 @@
-# FLINT 0.3.0-pre.1
+# FLINT 0.3.0-pre.2
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.
 No dependencies, no global state, no flags register.
+
+Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ```
 vm core:       ~56 opcodes, word = int64, 16 registers, flat memory
@@ -22,7 +24,7 @@ executable:    + src/flint_cli.c + src/main.c       (CLI host: stdio + POSIX fil
 | Word size     | **int64 signed** (`flint_word`), little-endian               |
 | Registers     | `r0..r15` — 16 general-purpose; ABI: `r0..r3` args/result, `r4..r11` caller-saved, `r12..r15` callee-saved |
 | Memory        | flat byte image; a word is 8 consecutive bytes, no alignment required |
-| Stack         | single (locals + return addresses), grows down from the end of memory; `push`/`pop` move 8 bytes; a CALL frame is one word (return pc); `enter N`/`leave` build a local frame ([saved fp] + N local bytes) |
+| Stack         | single (locals + return addresses), grows down from the end of memory; `push`/`pop` move 8 bytes; a CALL frame is one word (return pc); every stack write is checked against `heap_ptr` and traps `FLINT_ERR_STACK` instead of overwriting the heap; `enter N`/`leave` build a local frame ([saved fp] + N local bytes) |
 | Comparisons   | no flags register: comparison is *fused into branches* (MIPS/RISC-V lineage) |
 | Syscalls      | host-provided table: up to 64 slots, `sys N` calls the host function; arguments/result travel in r0..r3 |
 | Steps         | `max_steps` — protection against runaway loops; `0` = unlimited |
@@ -412,10 +414,18 @@ responsible for preserving `r12..r15` (push/pop around the body).
 ### Memory allocation
 
 Two models share one heap region between the data section and the stack
-(the cursor grows up, the stack grows down; a block that would cross the
-stack pointer fails, and an `enter` frame that would grow into the heap
-traps as a stack violation). The model is picked by `Flint.toml`,
-`--memory`, or the defaults above.
+(the cursor grows up, the stack grows down). Allocation fails if a block
+would cross the stack pointer; every stack write (`push`, `pushi`, and the
+return address of `call`) is rejected with `FLINT_ERR_STACK` if it would
+cross `heap_ptr`, and `enter N` checks its whole frame before reserving it.
+The model is picked by `Flint.toml`, `--memory`, or the defaults above.
+
+> **0.3.0-pre.2:** every stack write is now checked against `heap_ptr`.
+> Previously `push`/`call` could cross the frontier and overwrite a managed
+> block header, making the next collector walk report
+> `managed heap corrupt (block header damaged)` instead of the real cause.
+> The guard applies to both memory models; the manual bump arena had the
+> same silent overwrite. Regression tests cover auto and manual.
 
 **manual — bump arena.** `alloc rd, n` returns the cursor and moves it
 up by n. `return` never rewinds the cursor: a callee's block stays

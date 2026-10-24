@@ -190,6 +190,38 @@ static void t_stack(void)
     CHECK(vm.err == FLINT_ERR_STACK, "pop on empty stack traps");
 }
 
+static void t_stack_heap_guard(void)
+{
+    flint_vm vm;
+    static flint_byte mem[65536];
+    uint32_t f_ge, f_jmp, hlt;
+
+    hasm_reset();
+    e8(OP_ALLOC); e8(0); e64(65000);   /* r0 = bump base, cursor 65064 */
+    e_set(1, 0);
+    f_ge = 0;
+    f_jmp = 0;
+    {
+        uint32_t loop = cn;
+        e_push(1);
+        e_inc(1);
+        e_jgei(1, 100, &f_ge);         /* 100 pushes cross the frontier */
+        e_jmp(&f_jmp);
+        hlt = cn; e_hlt();
+        patch(f_ge, hlt);
+        patch(f_jmp, loop);
+    }
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_heap_set(&vm, 64, FLINT_MEM_MANUAL);
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_ERR_STACK && vm.r[0] == 64,
+          "manual: push traps at heap_ptr instead of overwriting it");
+    CHECK(vm.heap_ptr == 65064,
+          "manual: stack guard leaves the bump frontier intact");
+}
+
 static void t_badreg(void)
 {
     flint_vm vm;
@@ -312,6 +344,7 @@ int main(void)
     t_limit();
     t_badmem();
     t_stack();
+    t_stack_heap_guard();
     t_badreg();
     t_reg15();
     t_frames();

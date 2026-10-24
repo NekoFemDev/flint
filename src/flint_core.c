@@ -77,7 +77,14 @@ static void mem_store(flint_vm *vm, uint32_t addr, uint32_t n, flint_word v)
 
 static int stk_push(flint_vm *vm, flint_word v)
 {
-    if (vm->sp < 8) { vm->err = FLINT_ERR_STACK; return 0; }
+    /* The stack shares mem with the heap and grows down. Refuse the push
+     * before it can cross heap_ptr: alloc/enter already check this, but
+     * push/call used to bypass the frontier and could overwrite a managed
+     * block header (or a manual bump block). */
+    if (vm->sp < 8 || vm->sp - 8 < vm->heap_ptr) {
+        vm->err = FLINT_ERR_STACK;
+        return 0;
+    }
     vm->sp -= 8;
     mem_store(vm, vm->sp, 8, v);
     return 1;
@@ -162,7 +169,7 @@ void flint_init(flint_vm *vm,
     vm->pc = 0;         vm->sp = mem_size;
     vm->fp = (flint_word)mem_size;     /* no frame yet */
     vm->heap_ptr = 0;   vm->heap_start = 0;
-    vm->mem_mode = FLINT_MEM_MANUAL;   /* informational (flint_mem_mode) */
+    vm->mem_mode = FLINT_MEM_MANUAL;   /* default; flint_heap_set() selects */
     vm->steps = 0;      vm->max_steps = 0;
     vm->halted = 0;
     vm->err = FLINT_OK; vm->err_text = 0;

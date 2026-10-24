@@ -1,9 +1,11 @@
 # FLINT Automatic Memory — TODOs
 
-Status: **implemented (v0.3.0-pre.1)**. Auto mode now has real automatic memory:
+Status: **implemented (v0.3.0-pre.2)**. Auto mode now has real automatic memory:
 a conservative, non-moving mark-sweep collector plus a first-fit free-list
 allocator (`src/flint_gc.c`), wired into `alloc`/`free`/`gc`, the `.fbc`
-image path, and the standalone ELF stub. Manual mode is unchanged.
+image path, and the standalone ELF stub. The `0.3.0-pre.2` patch adds a
+stack/heap-frontier guard for `push`/`call` (see below). Manual mode is
+otherwise unchanged.
 
 ## Evidence (v0.3.0)
 
@@ -22,10 +24,17 @@ image path, and the standalone ELF stub. Manual mode is unchanged.
   zeros / 0xFF) × 4 execution paths (project, single-file `--memory
   auto`, `.fbc`, isolated ELF) all diff clean against `base64 -w0`,
   plus stress/stats/env checks.
-- `build/test_gc`: 80 checks — header layout, split/coalesce, roots
+- `build/test_gc`: 82 checks — header layout, split/coalesce, roots
   (registers/stack/data/host/pins), cycles, escaping objects, interior
   pointers, mark-stack overflow slow path, bounded allocation loops,
-  stress mode, manual-mode no-ops.
+  stress mode, manual-mode no-ops, and the stack/heap frontier guard.
+- **v0.3.0-pre.2 regression:** stack growth is checked against `heap_ptr`.
+  A program that allocated most of memory and then pushed 100 words used
+  to cross the frontier; in auto mode the collector then reported
+  `managed heap corrupt (block header damaged)`, while manual mode
+  silently overwrote its bump heap. `test_gc` (auto) and `test_core`
+  (manual) now require `FLINT_ERR_STACK` before the first crossing and
+  verify that the heap frontier/header is untouched.
 - An arena-style mark/restore on `enter`/`leave` is **not** the design.
   In auto mode `enter N` only zeroes the fresh frame (fewer stale
   conservative roots); it reclaims nothing.
@@ -77,6 +86,8 @@ garbage without reusable free blocks does not solve exhaustion.
 - [x] `OP_ALLOC` / `OP_FREE`
 - [x] `enter` / `leave` frames
 - [x] `heap_start`, `heap_ptr`, `sp`, `fp`
+- [x] stack/heap frontier guard for `push`/`pushi`/`call`/`enter`
+      (`0.3.0-pre.2`; traps `FLINT_ERR_STACK` at `heap_ptr`)
 - [x] `.fbc` image path
 - [x] ELF stub path
 - [x] basic heap tests and examples
@@ -164,7 +175,8 @@ garbage without reusable free blocks does not solve exhaustion.
   - [x] not during a host syscall (collector never runs there; hosts pin
         payloads they retain)
 - [x] Define OOM behavior and a new error code: `FLINT_ERR_OOM` = 10.
-- [x] Version bump: **0.3.0-pre.1** (auto mode is a breaking semantic change).
+- [x] Version bump: **0.3.0-pre.2** (auto mode is a breaking semantic change;
+      pre.2 fixes the stack/heap collision).
 - [x] Document that auto mode is a breaking semantic change.
 
 ### Phase 1 — Managed heap and allocator
@@ -390,13 +402,15 @@ is differential-tested against the old bump behavior.
 
 ## Bottom line
 
-FLINT 0.3.0-pre.1 has a real automatic memory manager: managed object
+FLINT 0.3.0-pre.2 has a real automatic memory manager: managed object
 metadata, a first-fit free-list allocator with split/coalesce/shrink,
 conservative root discovery, an explicit mark worklist with an overflow
 slow path, sweep with cycle collection, safepoints, stats, stress mode,
 a `gc` instruction, a host API, integration through `flint run` /
 `.fbc` / ELF, and an acceptance test that pits the collector against
-`base64 -w0` on 8 inputs × 4 execution paths. Manual mode is untouched.
+`base64 -w0` on 8 inputs × 4 execution paths. The pre.2 patch closes the
+stack/heap collision: `push`/`call`/`enter` cannot cross `heap_ptr`.
+Manual mode is otherwise untouched.
 
 The known limits are conservative-GC limits, documented in the README:
 false retention by address-looking words, missed unaligned pointer
