@@ -1,0 +1,84 @@
+// progress-demo — real workload with auto memory and a progress bar.
+//
+// Computes sum 0..n-1, allocating a small block each iteration to load
+// the collector, and draws the progress bar every `every` steps.
+//
+// Usage:
+//   flint run examples/progress-demo --memory auto --gc-stats
+
+include "../../../lib/progress.flt"
+
+data:
+n:      int 100000
+every:  int 10000
+i:      int 0
+sum:    int 0
+start:  int 0
+
+code:
+main:
+    // initial time for ETA
+    set r0, 8
+    sys 8
+    set r1, start
+    store [r1], r0
+
+    set r1, i
+    set r2, 0
+    store [r1], r2        // i = 0
+
+    set r1, sum
+    store [r1], r2        // sum = 0
+
+.loop:
+    set r1, i
+    load r0, [r1]         // r0 = i
+
+    set r1, n
+    load r3, [r1]         // r3 = n
+    jump.ge r0, r3, .done
+
+    // work: sum += i
+    set r1, sum
+    load r2, [r1]
+    add r2, r2, r0
+    store [r1], r2
+
+    // auto memory load: allocate without manual free
+    alloc r1, 64
+
+    // progress bar every `every` iterations
+    set r1, i
+    load r2, [r1]         // r2 = done
+    set r1, every
+    load r3, [r1]         // r3 = every
+    mod r4, r2, r3
+    jump.ne r4, .next
+
+    set r1, i
+    load r1, [r1]         // r1 = done
+    set r2, n
+    load r2, [r2]         // r2 = total
+    set r3, 20            // bar width
+    call s_progress_bar
+    set r0, 10
+    sys 1
+
+.next:
+    set r1, i
+    load r2, [r1]
+    inc r2
+    store [r1], r2
+    jump .loop
+
+.done:
+    set r0, 10
+    sys 1
+    set r1, sum
+    load r1, [r1]
+    call s_num
+    set r0, 10
+    sys 1
+
+    set r0, 0
+    exit

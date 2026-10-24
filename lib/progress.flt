@@ -1,17 +1,19 @@
-// progress — минимальный прогресс-бар, вдохновлённый tqdm.
+// progress — minimal progress bar inspired by tqdm.
 //
 // Usage:   include "progress.flt"
-// ABI:     аргументы r1..r3, результат r0; r4..r9 могут быть перетерты.
+// ABI:     arguments r1..r3, result r0; r4..r9 may be clobbered.
 //
 // s_progress_bar(r1 = done, r2 = total, r3 = width) -> r0 = 0
-//   Печатает в stdout: \r[####....] pct%
-//   Не завершает строку символом новой строки — вызывающий пишет её сам.
-//   Ширина ограничивается 80 символами. Без аллокаций и без буферов:
-//   символы бар и проценты выводятся по одному через sys 1.
+//   Prints to stdout: \r[####....] pct%
+//   Does not append a newline — the caller prints one if they want each
+//   step on its own line. Width is capped at 80. No allocations and no
+//   buffers: bar characters and percent are printed one by one via sys 1.
 //
 // s_progress_eta(r1 = start_seconds, r2 = done, r3 = total) -> r0 = eta_seconds
-//   Очень примитивная оценка: (total - done) * elapsed / done.
-//   Если done == 0 или elapsed <= 0 — возвращает 0.
+//   Very primitive estimate: (total - done) * elapsed / done.
+//   Returns 0 if done == 0 or elapsed <= 0.
+
+include "stdlib.flt"
 
 code:
 
@@ -20,7 +22,7 @@ s_progress_bar:                       // r1 = done, r2 = total, r3 = width
     copy r5, r2                       // total
     copy r6, r3                       // width
 
-    // Ограничить ширину 80.
+    // Cap width at 80.
     set r1, 80
     jump.lt r1, r6, .clamp_width
     jump .have_width
@@ -51,8 +53,8 @@ s_progress_bar:                       // r1 = done, r2 = total, r3 = width
     set r0, 91
     sys 1
 
-    // заполнено #
-    copy r7, r9                      // счётчик
+    // filled #
+    copy r7, r9                      // counter
 .copy_hash:
     jump.eq r7, .copy_dots
     set r0, 35                       // '#'
@@ -60,7 +62,7 @@ s_progress_bar:                       // r1 = done, r2 = total, r3 = width
     dec r7
     jump .copy_hash
 
-    // остальное .
+    // remaining .
 .copy_dots:
     copy r7, r6
     sub r7, r7, r9                   // remaining = width - filled
@@ -72,21 +74,21 @@ s_progress_bar:                       // r1 = done, r2 = total, r3 = width
     jump .copy_dot_loop
 
 .bar_done:
-    // ] и пробел
+    // ] and space
     set r0, 93
     sys 1
     set r0, 32
     sys 1
 
-    // процент (0..100)
+    // percent (0..100)
     copy r1, r8
     copy r2, r1
-    div r2, r2, 100         // сотни (0 или 1)
-    mod r1, r1, 100         // остаток
+    div r2, r2, 100                  // hundreds (0 or 1)
+    mod r1, r1, 100                  // remainder
     jump.eq r2, .no_hundred
-    set r0, 49              // '1'
+    set r0, 49                       // '1'
     sys 1
-    // сотни напечатаны — остаток всегда двумя цифрами
+    // hundreds printed — remainder is always two digits
     copy r2, r1
     div r2, r2, 10
     mod r3, r1, 10
@@ -99,8 +101,8 @@ s_progress_bar:                       // r1 = done, r2 = total, r3 = width
     jump .pct_done
 .no_hundred:
     copy r2, r1
-    div r2, r2, 10          // десятки
-    mod r3, r1, 10          // единицы
+    div r2, r2, 10                   // tens
+    mod r3, r1, 10                   // ones
     jump.eq r2, .no_tens
     set r0, 48
     add r0, r0, r2
