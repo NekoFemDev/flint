@@ -1,0 +1,120 @@
+// crc32c — known-answer tests for lib/crc32c.flt.
+//
+// Expected output:
+//   empty 00000000
+//   123456789 e3069283
+//   fox 22620404
+//   abc 364b3fb7
+//   incremental e3069283
+
+include "stdlib.flt"
+include "crc32c.flt"
+
+data:
+empty:          bytes 1
+msg1:           str "123456789"
+msg2:           str "The quick brown fox jumps over the lazy dog"
+msg3:           str "abc"
+part1:          str "1234"
+part2:          str "56789"
+lbl_empty:      str "empty ", 0
+lbl_msg1:       str "123456789 ", 0
+lbl_fox:        str "fox ", 0
+lbl_abc:        str "abc ", 0
+lbl_inc:        str "incremental ", 0
+hexdigits:      str "0123456789abcdef"
+hexbuf:         bytes 8
+
+code:
+main:
+    // empty input: standard CRC-32C is 0x00000000
+    set r1, empty
+    set r2, 0
+    call s_crc32c
+    copy r12, r0
+    set r1, lbl_empty
+    call s_print
+    copy r1, r12
+    call print_hex32
+    call newline
+
+    // CRC-32C check value: "123456789" -> 0xE3069283
+    set r1, msg1
+    set r2, 9
+    call s_crc32c
+    copy r12, r0
+    set r1, lbl_msg1
+    call s_print
+    copy r1, r12
+    call print_hex32
+    call newline
+
+    // classic sentence -> 0x22620404
+    set r1, msg2
+    set r2, 43
+    call s_crc32c
+    copy r12, r0
+    set r1, lbl_fox
+    call s_print
+    copy r1, r12
+    call print_hex32
+    call newline
+
+    // short string -> 0x364B3FB7
+    set r1, msg3
+    set r2, 3
+    call s_crc32c
+    copy r12, r0
+    set r1, lbl_abc
+    call s_print
+    copy r1, r12
+    call print_hex32
+    call newline
+
+    // streaming parity: update("1234") then update("56789")
+    set r1, 0xFFFFFFFF
+    set r2, part1
+    set r3, 4
+    call s_crc32c_update
+    copy r1, r0
+    set r2, part2
+    set r3, 5
+    call s_crc32c_update
+    set r1, 0xFFFFFFFF
+    xor r0, r0, r1
+    copy r12, r0
+    set r1, lbl_inc
+    call s_print
+    copy r1, r12
+    call print_hex32
+    call newline
+
+    set r0, 0
+    exit
+
+// r1 = 32-bit value; writes 8 lowercase hex digits without a newline
+print_hex32:
+    set r2, hexbuf
+    set r3, 8
+.ph_loop:
+    sub r3, r3, 1
+    shl r4, r3, 2
+    shr r5, r1, r4
+    and r5, r5, 15
+    set r6, hexdigits
+    add r6, r6, r5
+    load.byte r7, [r6+0]
+    store.byte [r2+0], r7
+    inc r2
+    jump.ne r3, .ph_loop
+    set r1, hexbuf
+    set r2, 8
+    sys 0
+    set r0, 0
+    return
+
+newline:
+    set r0, 10
+    sys 1
+    set r0, 0
+    return

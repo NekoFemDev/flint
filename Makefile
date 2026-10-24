@@ -74,10 +74,19 @@ test: $(TESTS) $(BIN) $(STUB)
 	  && ./$(BIN) tests/regs.flt  | grep -q "r15 = 0"     \
 	  && ./$(BIN) tests/libdemo.flt | grep -q 63          \
 	  && ./$(BIN) tests/libdemo.flt | grep -q 9           \
+	  && ./$(BIN) tests/crc32_test.flt | grep -q "empty 00000000" \
+	  && ./$(BIN) tests/crc32_test.flt | grep -q "123456789 cbf43926" \
+	  && ./$(BIN) tests/crc32_test.flt | grep -q "fox 414fa339" \
+	  && ./$(BIN) tests/crc32_test.flt | grep -q "incremental cbf43926" \
+	  && ./$(BIN) tests/crc32c_test.flt | grep -q "empty 00000000" \
+	  && ./$(BIN) tests/crc32c_test.flt | grep -q "123456789 e3069283" \
+	  && ./$(BIN) tests/crc32c_test.flt | grep -q "fox 22620404" \
+	  && ./$(BIN) tests/crc32c_test.flt | grep -q "abc 364b3fb7" \
+	  && ./$(BIN) tests/crc32c_test.flt | grep -q "incremental e3069283" \
 	  && ./$(BIN) tests/heap.flt  | grep -q "heap ok"       \
 	  && ./$(BIN) tests/heap.flt  | grep -q "mode: manual"  \
 	  && ./$(BIN) tests/mem.flt   | grep -q "flint"
-	@echo "examples: 9/9 programs run"
+	@echo "examples: 11/11 programs run"
 	@./$(BIN) build --elf tests/hello.flt >/dev/null \
 	  && ./target/hello | grep -q "Hello, FLINT!" \
 	  && ./$(BIN) build --elf tests/heap.flt >/dev/null \

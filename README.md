@@ -286,6 +286,21 @@ takes a resolver callback per file, while `flint_pp_includes()` is a
 standalone textual preprocessor (fopen, depth-capped at 10) for hosts
 without a resolver.
 
+### Bundled libraries
+
+```
+lib/stdlib.flt  print/strlen/memcpy/memset/itoa/num (CLI syscalls)
+lib/string.flt  strcpy/strcat/strcmp/upper/lower
+lib/crc32.flt   CRC-32/ISO-HDLC; one-shot + streaming, no allocation
+lib/crc32c.flt  CRC-32C / Castagnoli; one-shot + streaming, no allocation
+```
+
+`crc32.flt` exposes `s_crc32(r1 = data, r2 = len)` for a complete
+checksum, and `s_crc32_update(r1 = crc, r2 = data, r3 = len)` for
+streaming; streaming callers start at `0xFFFFFFFF` and apply the final
+`0xFFFFFFFF` xor themselves. It is reentrant and works in both memory
+models.
+
 ### Memory operands
 
 ```
@@ -622,6 +637,8 @@ tests/off.flt     119                                 (store/load with an offset
 tests/fio.flt     42                                  (open/write/read/close round-trip)
 tests/regs.flt    r0 = 15 … r15 = 0                   (register dump)
 tests/libdemo.flt 63 / 9 / 11 / HELLO WORLD           (stdlib + string includes)
+tests/crc32_test.flt empty / 123456789 / fox / incremental (CRC-32 known vectors)
+tests/crc32c_test.flt empty / 123456789 / fox / abc / incremental (CRC-32C known vectors)
 tests/mem.flt     flint                               (s_memset/s_memcpy via .include)
 tests/heap.flt    heap mode: manual + heap ok         (alloc/free + persistent allocations)
 ```

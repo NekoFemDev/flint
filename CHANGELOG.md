@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `lib/crc32.flt`: CRC-32/ISO-HDLC (reflected polynomial `0xEDB88320`)
+  with one-shot `s_crc32` and streaming `s_crc32_update`. No allocation,
+  no static scratch; works in manual and auto modes.
+- `lib/crc32c.flt`: CRC-32C / Castagnoli (reflected polynomial
+  `0x82F63B78`) with one-shot `s_crc32c` and streaming
+  `s_crc32c_update`. Same ABI, no allocation, works in manual and auto.
+- `tests/crc32_test.flt` and `tests/crc32c_test.flt`: known-answer
+  vectors for empty input, `"123456789"`, the classic quick-brown-fox
+  sentence, short strings, and streaming parity. Wired into `make test`.
+
 ## 0.3.0-pre.2 — 2026-10-24
 
 ### Fixed

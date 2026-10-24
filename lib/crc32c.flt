@@ -1,0 +1,56 @@
+// crc32c — CRC-32C / Castagnoli, reflected polynomial 0x82F63B78.
+//
+// Usage:   include "crc32c.flt"
+// ABI:     arguments r1..r3, result r0; r4..r7 may be clobbered.
+//
+// s_crc32c(r1 = data, r2 = len) -> r0 = crc (32-bit)
+//     One-shot: init 0xFFFFFFFF, process len bytes, final xor 0xFFFFFFFF.
+//
+// s_crc32c_update(r1 = crc, r2 = data, r3 = len) -> r0 = crc
+//     Streaming step: no init/final xor. Start with 0xFFFFFFFF and xor the
+//     result with 0xFFFFFFFF after the last chunk.
+//
+// No allocation and no static scratch; safe in manual and auto modes.
+// Bitwise variant: no table, 8 steps per input byte.
+
+code:
+
+s_crc32c:                        // r1 = data, r2 = len; r0 = crc
+    copy r3, r2                 // len
+    copy r2, r1                 // data
+    set r1, 0xFFFFFFFF          // init
+    call s_crc32c_update
+    set r1, 0xFFFFFFFF          // final xor
+    xor r0, r0, r1
+    return
+
+s_crc32c_update:                 // r1 = crc, r2 = data, r3 = len; r0 = crc
+    copy r0, r1
+    copy r4, r2                 // input cursor
+    copy r5, r3                 // bytes remaining
+    set r6, 0x82F63B78          // reflected Castagnoli polynomial
+    jump.eq r5, .done
+
+.loop:
+    load.byte r1, [r4+0]
+    xor r0, r0, r1
+    set r7, 8
+
+.bit:
+    and r1, r0, 1
+    jump.eq r1, .zero
+    shr r0, r0, 1
+    xor r0, r0, r6
+    jump .next
+.zero:
+    shr r0, r0, 1
+.next:
+    dec r7
+    jump.ne r7, .bit
+
+    inc r4
+    dec r5
+    jump.ne r5, .loop
+
+.done:
+    return
