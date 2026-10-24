@@ -1,0 +1,62 @@
+// progress — минимальные проверки рендеринга прогресс-бара.
+//
+// Ожидаемый вывод (каждая строка начинается с \r):
+//   \r[                ] 0%
+//   \r[#####.......... ] 25%
+//   \r[##########......] 50%
+//   \r[##############..] 75%
+//   \r[################] 100%
+
+include "progress.flt"
+
+data:
+lbl_zero:   str "p0: ", 0
+lbl_q1:     str "p25: ", 0
+lbl_half:   str "p50: ", 0
+lbl_q3:     str "p75: ", 0
+lbl_full:   str "p100: ", 0
+
+code:
+main:
+    // 0%
+    set r1, 0
+    set r2, 100
+    set r3, 20
+    call s_progress_bar
+    set r0, 10
+    sys 1
+
+    // 25%
+    set r1, 25
+    set r2, 100
+    set r3, 20
+    call s_progress_bar
+    set r0, 10
+    sys 1
+
+    // 50%
+    set r1, 50
+    set r2, 100
+    set r3, 20
+    call s_progress_bar
+    set r0, 10
+    sys 1
+
+    // 75%
+    set r1, 75
+    set r2, 100
+    set r3, 20
+    call s_progress_bar
+    set r0, 10
+    sys 1
+
+    // 100%
+    set r1, 100
+    set r2, 100
+    set r3, 20
+    call s_progress_bar
+    set r0, 10
+    sys 1
+
+    set r0, 0
+    exit

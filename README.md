@@ -293,6 +293,7 @@ lib/stdlib.flt  print/strlen/memcpy/memset/itoa/num (CLI syscalls)
 lib/string.flt  strcpy/strcat/strcmp/upper/lower
 lib/crc32.flt   CRC-32/ISO-HDLC; one-shot + streaming, no allocation
 lib/crc32c.flt  CRC-32C / Castagnoli; one-shot + streaming, no allocation
+lib/progress.flt минимальный прогресс-бар (типа tqdm): \r[####....] pct% + примитивный ETA
 ```
 
 `crc32.flt` exposes `s_crc32(r1 = data, r2 = len)` for a complete
@@ -639,6 +640,7 @@ tests/regs.flt    r0 = 15 … r15 = 0                   (register dump)
 tests/libdemo.flt 63 / 9 / 11 / HELLO WORLD           (stdlib + string includes)
 tests/crc32_test.flt empty / 123456789 / fox / incremental (CRC-32 known vectors)
 tests/crc32c_test.flt empty / 123456789 / fox / abc / incremental (CRC-32C known vectors)
+tests/progress_test.flt 0% / 25% / 50% / 75% / 100% (мини-progress bar)
 tests/mem.flt     flint                               (s_memset/s_memcpy via .include)
 tests/heap.flt    heap mode: manual + heap ok         (alloc/free + persistent allocations)
 ```

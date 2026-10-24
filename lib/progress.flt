@@ -1,0 +1,133 @@
+// progress — минимальный прогресс-бар, вдохновлённый tqdm.
+//
+// Usage:   include "progress.flt"
+// ABI:     аргументы r1..r3, результат r0; r4..r9 могут быть перетерты.
+//
+// s_progress_bar(r1 = done, r2 = total, r3 = width) -> r0 = 0
+//   Печатает в stdout: \r[####....] pct%
+//   Не завершает строку символом новой строки — вызывающий пишет её сам.
+//   Ширина ограничивается 80 символами. Без аллокаций и без буферов:
+//   символы бар и проценты выводятся по одному через sys 1.
+//
+// s_progress_eta(r1 = start_seconds, r2 = done, r3 = total) -> r0 = eta_seconds
+//   Очень примитивная оценка: (total - done) * elapsed / done.
+//   Если done == 0 или elapsed <= 0 — возвращает 0.
+
+code:
+
+s_progress_bar:                       // r1 = done, r2 = total, r3 = width
+    copy r4, r1                       // done
+    copy r5, r2                       // total
+    copy r6, r3                       // width
+
+    // Ограничить ширину 80.
+    set r1, 80
+    jump.lt r1, r6, .clamp_width
+    jump .have_width
+.clamp_width:
+    set r6, 80
+.have_width:
+
+    // percent = done * 100 / total
+    set r7, 0
+    jump.eq r5, .total_zero
+    set r1, 100
+    mul r4, r4, r1
+    div r8, r4, r5                   // r8 = percent
+    jump .have_pct
+.total_zero:
+    set r8, 100
+.have_pct:
+
+    // filled = percent * width / 100
+    copy r1, r8
+    mul r1, r1, r6
+    div r1, r1, 100
+    copy r9, r1                      // r9 = filled count
+
+    // \r[
+    set r0, 13
+    sys 1
+    set r0, 91
+    sys 1
+
+    // заполнено #
+    copy r7, r9                      // счётчик
+.copy_hash:
+    jump.eq r7, .copy_dots
+    set r0, 35                       // '#'
+    sys 1
+    dec r7
+    jump .copy_hash
+
+    // остальное .
+.copy_dots:
+    copy r7, r6
+    sub r7, r7, r9                   // remaining = width - filled
+.copy_dot_loop:
+    jump.eq r7, .bar_done
+    set r0, 46                       // '.'
+    sys 1
+    dec r7
+    jump .copy_dot_loop
+
+.bar_done:
+    // ] и пробел
+    set r0, 93
+    sys 1
+    set r0, 32
+    sys 1
+
+    // процент (0..100)
+    copy r1, r8
+    copy r2, r1
+    div r2, r2, 100         // сотни (0 или 1)
+    mod r1, r1, 100         // остаток
+    jump.eq r2, .no_hundred
+    set r0, 49              // '1'
+    sys 1
+    // сотни напечатаны — остаток всегда двумя цифрами
+    copy r2, r1
+    div r2, r2, 10
+    mod r3, r1, 10
+    set r0, 48
+    add r0, r0, r2
+    sys 1
+    set r0, 48
+    add r0, r0, r3
+    sys 1
+    jump .pct_done
+.no_hundred:
+    copy r2, r1
+    div r2, r2, 10          // десятки
+    mod r3, r1, 10          // единицы
+    jump.eq r2, .no_tens
+    set r0, 48
+    add r0, r0, r2
+    sys 1
+.no_tens:
+    set r0, 48
+    add r0, r0, r3
+    sys 1
+    jump .pct_done
+.pct_done:
+    set r0, 37                       // '%'
+    sys 1
+
+    set r0, 0
+    return
+
+s_progress_eta:                       // r1 = start, r2 = done, r3 = total -> r0 = eta
+    jump.eq r2, .eta_zero
+    copy r4, r3                       // remaining = total - done
+    sub r4, r4, r2
+    set r0, 8                         // sys time
+    sys 8                             // r0 = now
+    sub r5, r0, r1                    // elapsed
+    jump.lt r5, 1, .eta_zero          // elapsed <= 0
+    mul r4, r4, r5
+    div r0, r4, r2
+    return
+.eta_zero:
+    set r0, 0
+    return

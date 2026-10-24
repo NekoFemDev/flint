@@ -13,6 +13,12 @@
 - `tests/crc32_test.flt` and `tests/crc32c_test.flt`: known-answer
   vectors for empty input, `"123456789"`, the classic quick-brown-fox
   sentence, short strings, and streaming parity. Wired into `make test`.
+- `lib/progress.flt`: minimal progress bar inspired by tqdm —
+  `s_progress_bar(done, total, width)` prints `\r[####....] pct%`,
+  `s_progress_eta(start, done, total)` estimates remaining time.
+  No allocation, works in manual and auto modes.
+- `tests/progress_test.flt`: render check for 0/25/50/75/100%.
+  Wired into `make test`.
 
 ## 0.3.0-pre.2 — 2026-10-24
 

@@ -83,10 +83,15 @@ test: $(TESTS) $(BIN) $(STUB)
 	  && ./$(BIN) tests/crc32c_test.flt | grep -q "fox 22620404" \
 	  && ./$(BIN) tests/crc32c_test.flt | grep -q "abc 364b3fb7" \
 	  && ./$(BIN) tests/crc32c_test.flt | grep -q "incremental e3069283" \
+	  && ./$(BIN) tests/progress_test.flt | grep -q "0%" \
+	  && ./$(BIN) tests/progress_test.flt | grep -q "25%" \
+	  && ./$(BIN) tests/progress_test.flt | grep -q "50%" \
+	  && ./$(BIN) tests/progress_test.flt | grep -q "75%" \
+	  && ./$(BIN) tests/progress_test.flt | grep -q "100%" \
 	  && ./$(BIN) tests/heap.flt  | grep -q "heap ok"       \
 	  && ./$(BIN) tests/heap.flt  | grep -q "mode: manual"  \
 	  && ./$(BIN) tests/mem.flt   | grep -q "flint"
-	@echo "examples: 11/11 programs run"
+	@echo "examples: 12/12 programs run"
 	@./$(BIN) build --elf tests/hello.flt >/dev/null \
 	  && ./target/hello | grep -q "Hello, FLINT!" \
 	  && ./$(BIN) build --elf tests/heap.flt >/dev/null \
