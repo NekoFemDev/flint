@@ -1,0 +1,52 @@
+# release.yml — prebuilt binaries on version tags.
+#
+# On every `v*` tag: build and test FLINT on Linux, package the CLI
+# (`flint`) plus the `--elf` stub, and attach the archive to the GitHub
+# release for that tag. The release itself is created by the maintainer:
+#
+#   git tag -a v0.4.0-pre.2 -m "flint 0.4.0-pre.2"
+#   git push origin v0.4.0-pre.2
+#   gh release create v0.4.0-pre.2 --prerelease --notes-file release-notes-0.4.0-pre.2.md
+#
+# The upload step waits briefly for that release to exist.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test
+        run: |
+          make
+          make test
+
+      - name: Package
+        run: |
+          name="flint-${GITHUB_REF_NAME}-x86_64-linux"
+          mkdir -p "dist/$name/build"
+          cp build/flint "dist/$name/flint"
+          cp build/stub.elf "dist/$name/build/stub.elf"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 30); do
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 10
+          done
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/*.tar.gz dist/*.tar.gz.sha256 --clobber
