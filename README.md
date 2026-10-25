@@ -1,4 +1,4 @@
-# FLINT 0.4.0-pre.5
+# FLINT 0.4.0-pre.6
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.
@@ -85,12 +85,26 @@ flint --version
 
 Shortcut: `flint path/file.flt` ≡ `flint run path/file.flt` (same for `.fbc`).
 
+### REPL
+
 `flint repl` opens an interactive session: one statement per line,
 assembled and run on a live VM whose registers, memory and heap persist
-between lines (`sys 11` dumps the registers; `exit` or EOF closes). Each
-line is wrapped into a little program — the REPL supplies `main:` and a
-trailing `exit` when the line brings neither — so labels resolve only
-within their line, and a line that never halts is stopped at 1000 steps.
+between lines. `sys 11` (regs) dumps the registers; `exit` alone, or
+EOF, closes the session. Each line is wrapped into a little program —
+the REPL supplies `main:` and a trailing `exit` when the line brings
+neither — so labels resolve only within their line, and a line that
+never halts is stopped at 1000 steps:
+
+```
+$ flint repl
+> set r0, 42
+> add r0, r0, 1
+> sys 11
+r0 = 43
+r1 = 0
+...
+> exit
+```
 
 `run` options: `--gc-stats` prints a collector report to stderr after the
 run; `--gc-stress` forces a collection before every allocation;

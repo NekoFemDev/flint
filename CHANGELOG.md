@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0-pre.6 — 2026-10-26
+
+### Added
+
+- **File-metadata syscalls** in the CLI host (`src/flint_cli.c`): slot 7
+  `stat` (r0 = path, r1 = 8-byte out buffer; the size is written back as
+  int64), slot 8 `mkdir` (r0 = path, r1 = mode, e.g. 0755) and slot 9
+  `unlink` (r0 = path). Paths are validated as NUL-terminated spans
+  inside the VM image before the POSIX call; results are 0/−1.
+- **`flint repl`** (`src/flint_cli.c`): an interactive session over a
+  persistent 64 KiB VM — one statement per line, assembled and run with
+  registers, memory and the heap surviving between lines. Each line is
+  wrapped into a little program (the REPL supplies `main:` and a
+  trailing `exit` when the line brings neither), gets a fresh 1000-step
+  budget against runaway loops, and reports assembly errors without
+  closing the session; `sys 11` (regs) dumps state, `exit`/EOF ends it.
+
+### Changed
+
+- **`time` and `regs` moved from syscall slots 8/9 to 10/11**
+  (`include/flint_cli.h`) to make room for the file-meta set (7..9).
+  Breaking for programs that use `CLI_SYS_TIME` / `CLI_SYS_REGS` by
+  number; the bundled users (`lib/progress.flt`,
+  `examples/progress-demo`, `tests/regs.flt`) and the README syscall
+  table are updated.
+
 ## 0.4.0-pre.5 — 2026-10-25
 
 ### Added
