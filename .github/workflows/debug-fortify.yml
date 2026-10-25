@@ -26,9 +26,9 @@ jobs:
           ./build/flint tests/hello.flt;       echo "convenience rc=$?"
           ./build/flint run tests/sum.flt;     echo "sum rc=$?"
 
-      - name: Backtrace
+      - name: Backtrace (sum)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq gdb
-          gdb -batch -ex 'set pagination off' -ex run -ex bt \
-            --args ./build/flint check tests/hello.flt || true
+          gdb -batch -ex 'set pagination off' -ex run -ex 'bt full' \
+            --args ./build/flint run tests/sum.flt || true
