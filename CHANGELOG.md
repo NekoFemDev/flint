@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.0-pre.2 — 2026-10-25
+
+### Fixed
+
+- **glibc build under GCC 14+**: `realpath()` is hidden by glibc under
+  `-std=c99` without a feature-test macro, and GCC 14 turns the implicit
+  declaration into a hard error, so `make` failed on e.g. Arch.
+  `src/flint_cli.c` now defines `_POSIX_C_SOURCE 200809L` before its
+  includes.
+- `-Wformat-truncation` warnings from `full_local()` on newer GCC: the
+  `"%s%s"` composition uses explicit bounded copies with the same
+  truncation behavior.
+
+### Added
+
+- `.github/workflows/release.yml`: on every version tag, GitHub Actions
+  builds and tests FLINT on Linux and attaches the release archive
+  (`flint` + `build/stub.elf`, so `flint build --elf` works from the
+  extracted directory) to the GitHub release.
+- Prebuilt archives on the release page: `x86_64-linux` from CI and
+  `aarch64-termux` built on Termux (bionic).
+
 ## 0.4.0-pre.1 — 2026-10-25
 
 ### Added

@@ -84,7 +84,7 @@
 extern "C" {
 #endif
 
-#define FLINT_VERSION  "0.4.0-pre.1"
+#define FLINT_VERSION  "0.4.0-pre.2"
 #define FLINT_NREGS    16
 #define FLINT_MAX_SYS  64
 /* pseudo-register used in address-base fields; never a general register */
