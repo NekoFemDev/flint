@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0-pre.3 — 2026-10-25
+
+### Fixed
+
+- **Building from source on glibc ≥ 2.42** (e.g. current Arch): glibc
+  moved `realpath()`'s declaration guard from `__USE_XOPEN2K8` to
+  `__USE_MISC || __USE_XOPEN_EXTENDED`, so the `_POSIX_C_SOURCE` macro
+  introduced in 0.4.0-pre.2 stopped exposing the declaration there and
+  GCC failed with an implicit-declaration error. `src/flint_cli.c` now
+  defines `_XOPEN_SOURCE 700`, which satisfies both the old and the new
+  guard. Verified on Ubuntu 24.04 (GCC 13.3, glibc 2.39) and Ubuntu
+  26.04 (GCC 15.2, glibc 2.43): `-Werror` build, full `make test`, and
+  include-path probes.
+
+### Changed
+
+- The release workflow now packs `lib/` into the prebuilt archives and
+  writes bare filenames into the `.sha256` files, so the archives are
+  self-contained and `sha256sum -c` works from any download directory
+  (the 0.4.0-pre.2 assets were adjusted by hand after publishing).
+
 ## 0.4.0-pre.2 — 2026-10-25
 
 ### Fixed
