@@ -1,0 +1,563 @@
+// sha256 — SHA-256 (FIPS 180-4), bitwise, without tables.
+//
+// Usage:   include "sha256.flt"
+// ABI:     s_sha256(r1 = data_ptr, r2 = len, r3 = out_ptr) -> r0 = out_ptr
+//          Writes the 32-byte digest to out_ptr; clobbers r0..r11 and
+//          preserves r12..r15.
+//
+// Reentrant / thread-safe: no static scratch. The message schedule, the
+// hash state, the round counter and the padding all live in ENTER/LEAVE
+// frames, so concurrent VM instances and nested calls are safe.
+//
+// Test vectors (FIPS 180-4):
+//   ""     e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+//   "abc"  ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+// ===========================================================================
+
+include "stdlib.flt"
+
+data:
+// Round constants K[0..63] (FIPS 180-4 §4.2.2)
+K:  int 0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5
+    int 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5
+    int 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3
+    int 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174
+    int 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc
+    int 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da
+    int 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7
+    int 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967
+    int 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13
+    int 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85
+    int 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3
+    int 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070
+    int 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5
+    int 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3
+    int 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208
+    int 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+
+// Initial hash values H[0..7] (FIPS 180-4 §5.3.3)
+H_INIT: int 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a
+        int 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+
+code:
+
+// ===========================================================================
+// Internal helpers. Convention: args r1..r3, result r0; clobbers r0..r7;
+// r8..r15 survive (they carry the hash state during a compression).
+// ===========================================================================
+
+// r0 = rotr32(r1, r2), r2 in 1..31
+sha256_rotr:
+    copy r0, r1
+    set r4, 32
+    sub r4, r4, r2
+    shl r5, r1, r4
+    shr r0, r0, r2
+    or r0, r0, r5
+    set r4, 0xFFFFFFFF
+    and r0, r0, r4
+    return
+
+// r0 = (r1 + r2) mod 2^32 — every addition in SHA-256 goes through here
+sha256_add32:
+    add r0, r1, r2
+    set r4, 0xFFFFFFFF
+    and r0, r0, r4
+    return
+
+// r0 = Ch(r1, r2, r3) = (x & y) ^ (~x & z)
+sha256_ch:
+    copy r4, r1
+    and r0, r1, r2
+    not r1, r4
+    and r1, r1, r3
+    xor r0, r0, r1
+    return
+
+// r0 = Maj(r1, r2, r3) = (x & y) ^ (x & z) ^ (y & z)
+sha256_maj:
+    and r0, r1, r2
+    copy r4, r1
+    and r4, r4, r3
+    xor r0, r0, r4
+    copy r4, r2
+    and r4, r4, r3
+    xor r0, r0, r4
+    return
+
+// Big-sigma0: rotr(x,2) ^ rotr(x,13) ^ rotr(x,22)
+sha256_Sigma0:
+    copy r6, r1
+    set r2, 2
+    call sha256_rotr
+    copy r7, r0
+    copy r1, r6
+    set r2, 13
+    call sha256_rotr
+    xor r7, r7, r0
+    copy r1, r6
+    set r2, 22
+    call sha256_rotr
+    xor r0, r0, r7
+    return
+
+// Big-sigma1: rotr(x,6) ^ rotr(x,11) ^ rotr(x,25)
+sha256_Sigma1:
+    copy r6, r1
+    set r2, 6
+    call sha256_rotr
+    copy r7, r0
+    copy r1, r6
+    set r2, 11
+    call sha256_rotr
+    xor r7, r7, r0
+    copy r1, r6
+    set r2, 25
+    call sha256_rotr
+    xor r0, r0, r7
+    return
+
+// Schedule sigma0: rotr(x,7) ^ rotr(x,18) ^ (x >> 3)
+sha256_sigma0:
+    copy r6, r1
+    set r2, 7
+    call sha256_rotr
+    copy r7, r0
+    copy r1, r6
+    set r2, 18
+    call sha256_rotr
+    xor r7, r7, r0
+    shr r0, r6, 3
+    xor r0, r0, r7
+    return
+
+// Schedule sigma1: rotr(x,17) ^ rotr(x,19) ^ (x >> 10)
+sha256_sigma1:
+    copy r6, r1
+    set r2, 17
+    call sha256_rotr
+    copy r7, r0
+    copy r1, r6
+    set r2, 19
+    call sha256_rotr
+    xor r7, r7, r0
+    shr r0, r6, 10
+    xor r0, r0, r7
+    return
+
+// r0 = r2 + 4; write r1 as 4 big-endian bytes at [r2]
+sha256_be32:
+    copy r5, r1
+    shr r5, r5, 24
+    and r5, r5, 0xFF
+    store.byte [r2+0], r5
+    copy r5, r1
+    shr r5, r5, 16
+    and r5, r5, 0xFF
+    store.byte [r2+1], r5
+    copy r5, r1
+    shr r5, r5, 8
+    and r5, r5, 0xFF
+    store.byte [r2+2], r5
+    and r5, r1, 0xFF
+    store.byte [r2+3], r5
+    add r0, r2, 4
+    return
+
+// ===========================================================================
+// sha256_block — one compression (FIPS 180-4 §6.2.2).
+//
+// Internal calling convention:
+//   H state (a..h inputs) in r8..r15; updated in place on return.
+//   r1 = block source, r3 = mode:
+//       0 — one full 64-byte block, big-endian, at r1
+//       1 — final block, single:  r1 = data, r4 = rem (< 56), r5 = total
+//           builds: data[0..rem) | 0x80 | zeros | 64-bit length
+//       2 — final block, first of two (rem >= 56): data | 0x80 | zeros
+//       3 — final block, second of two: zeros | 64-bit length (r4 = 0)
+//   clobbers r0..r7; r8..r15 carry the updated state back.
+//
+// Frame layout (656 bytes):
+//   [fp-8]   mode            [fp-16]  loop counter — the 64-round counter
+//   [fp-24]  T1              [fp-32]  T2
+//   [fp-96..fp-40]  a..h working variables
+//   [fp-104] rem             [fp-112] total bytes
+//   [fp-120] s0              [fp-128] s1
+//   [fp-136] W word offset   [fp-648..fp-136)  W[0..63], 8 bytes per word
+// ===========================================================================
+sha256_block:
+    enter 656
+    store [fp-8], r3
+    jump.eq r3, .packed
+
+    // ---- pad modes 1/2/3: synthesize W[0..15] from data + padding ----
+    store [fp-104], r4          // rem
+    store [fp-112], r5          // total bytes
+    copy r4, r1                 // data cursor
+
+    // zero W[0..15]
+    set r6, -648
+    set r7, 0
+    set r5, 16
+.zloop:
+    store [fp+r6], r7
+    add r6, r6, 8
+    dec r5
+    jump.ne r5, .zloop
+
+    // per-byte block synthesis, g = 0..63
+    set r5, 0                   // g
+    set r6, -648                // word offset
+    set r7, 24                  // shift of the byte inside the word
+    set r3, 0                   // word accumulator
+    set r0, 0                   // byte value
+    set r1, 56                  // shift for the next length byte
+.sloop:
+    jump.eq r5, 64, .common
+    set r0, 0
+    load r2, [fp-104]           // rem
+    jump.ge r5, r2, .snotdata
+    load.byte r0, [r4+0]        // g < rem: message byte
+    inc r4
+    jump .sacc
+.snotdata:
+    jump.ne r5, r2, .slen
+    set r0, 128                 // g == rem: the 0x80 pad bit...
+    load r2, [fp-8]
+    jump.ne r2, 3, .sacc        // ...unless this is the length-only block
+    set r0, 0
+    jump .sacc
+.slen:
+    load r2, [fp-8]
+    jump.eq r2, 2, .sacc        // first of two blocks: no length here
+    set r2, 56
+    jump.lt r5, r2, .sacc       // still in the zero pad region
+    load r2, [fp-112]           // 64-bit bit-length, big-endian
+    shl r2, r2, 3
+    shr r2, r2, r1
+    and r0, r2, 0xFF
+    sub r1, r1, 8
+.sacc:
+    shl r0, r0, r7
+    or r3, r3, r0
+    jump.ne r7, .snext
+    store [fp+r6], r3           // one W word done
+    add r6, r6, 8
+    set r3, 0
+    set r7, 24
+    jump .sinc
+.snext:
+    sub r7, r7, 8
+.sinc:
+    inc r5
+    jump .sloop
+
+    // ---- mode 0: load W[0..15] from one full block, big-endian ----
+.packed:
+    copy r4, r1
+    set r6, -648
+    set r5, 16
+.ploop:
+    load.byte r0, [r4+0]
+    shl r0, r0, 24
+    load.byte r1, [r4+1]
+    shl r1, r1, 16
+    or r0, r0, r1
+    load.byte r1, [r4+2]
+    shl r1, r1, 8
+    or r0, r0, r1
+    load.byte r1, [r4+3]
+    or r0, r0, r1
+    store [fp+r6], r0
+    add r4, r4, 4
+    add r6, r6, 8
+    dec r5
+    jump.ne r5, .ploop
+
+.common:
+    // ---- extend W[16..63] (FIPS 180-4 §6.2.2 step 1) ----
+    set r4, 16
+    store [fp-16], r4
+    set r4, -520                // W offset of i = 16
+    store [fp-136], r4
+.extend:
+    load r4, [fp-16]
+    set r5, 64
+    jump.ge r4, r5, .rounds
+    // s0 = sigma0(W[i-15])
+    load r4, [fp-136]
+    sub r4, r4, 120
+    load r1, [fp+r4]
+    call sha256_sigma0
+    store [fp-120], r0
+    // s1 = sigma1(W[i-2])
+    load r4, [fp-136]
+    sub r4, r4, 16
+    load r1, [fp+r4]
+    call sha256_sigma1
+    store [fp-128], r0
+    // W[i] = W[i-16] + s0 + W[i-7] + s1   (mod 2^32)
+    load r4, [fp-136]
+    sub r4, r4, 128
+    load r1, [fp+r4]            // W[i-16]
+    load r2, [fp-120]           // s0
+    call sha256_add32
+    copy r1, r0                 // r1 = running sum
+    load r4, [fp-136]
+    sub r4, r4, 56
+    load r2, [fp+r4]            // W[i-7]
+    call sha256_add32
+    copy r1, r0                 // r1 = running sum
+    load r2, [fp-128]           // s1
+    call sha256_add32
+    load r7, [fp-136]
+    store [fp+r7], r0           // W[i]
+    load r4, [fp-16]
+    inc r4
+    store [fp-16], r4
+    load r4, [fp-136]
+    add r4, r4, 8
+    store [fp-136], r4
+    jump .extend
+
+.rounds:
+    // ---- step 2: a..h := H ----
+    store [fp-96], r8           // a
+    store [fp-88], r9           // b
+    store [fp-80], r10          // c
+    store [fp-72], r11          // d
+    store [fp-64], r12          // e
+    store [fp-56], r13          // f
+    store [fp-48], r14          // g
+    store [fp-40], r15          // h
+    set r4, 0
+    store [fp-16], r4           // round counter i = 0 — stays in memory so
+                                // helper calls cannot clobber it
+.round_loop:
+    load r4, [fp-16]
+    set r5, 64
+    jump.ge r4, r5, .store_h
+
+    // T1 = h + Sigma1(e) + Ch(e,f,g) + K[i] + W[i]
+    load r1, [fp-64]            // e
+    call sha256_Sigma1
+    copy r2, r0
+    load r1, [fp-40]            // h
+    call sha256_add32
+    store [fp-24], r0           // acc
+
+    load r1, [fp-64]
+    load r2, [fp-56]
+    load r3, [fp-48]
+    call sha256_ch
+    copy r2, r0
+    load r1, [fp-24]
+    call sha256_add32
+    store [fp-24], r0
+
+    load r4, [fp-16]
+    shl r4, r4, 3
+    set r5, K
+    add r4, r4, r5
+    load r1, [r4]               // K[i]
+    load r2, [fp-24]
+    call sha256_add32
+    store [fp-24], r0
+
+    load r4, [fp-16]
+    shl r4, r4, 3
+    add r4, r4, -648
+    load r1, [fp+r4]            // W[i]
+    load r2, [fp-24]
+    call sha256_add32
+    store [fp-24], r0           // T1
+
+    // T2 = Sigma0(a) + Maj(a,b,c)
+    load r1, [fp-96]
+    call sha256_Sigma0
+    store [fp-32], r0
+    load r1, [fp-96]
+    load r2, [fp-88]
+    load r3, [fp-80]
+    call sha256_maj
+    copy r2, r0
+    load r1, [fp-32]
+    call sha256_add32
+    store [fp-32], r0           // T2
+
+    // step 3 rotations: h=g, g=f, f=e, e=d+T1, d=c, c=b, b=a, a=T1+T2
+    load r4, [fp-48]
+    store [fp-40], r4
+    load r4, [fp-56]
+    store [fp-48], r4
+    load r4, [fp-64]
+    store [fp-56], r4
+    load r1, [fp-72]
+    load r2, [fp-24]
+    call sha256_add32
+    store [fp-64], r0
+    load r4, [fp-80]
+    store [fp-72], r4
+    load r4, [fp-88]
+    store [fp-80], r4
+    load r4, [fp-96]
+    store [fp-88], r4
+    load r1, [fp-24]
+    load r2, [fp-32]
+    call sha256_add32
+    store [fp-96], r0
+
+    load r4, [fp-16]
+    inc r4
+    store [fp-16], r4
+    jump .round_loop
+
+.store_h:
+    // ---- step 4: H[i] += working variables ----
+    load r1, [fp-96]
+    copy r2, r8
+    call sha256_add32
+    copy r8, r0
+    load r1, [fp-88]
+    copy r2, r9
+    call sha256_add32
+    copy r9, r0
+    load r1, [fp-80]
+    copy r2, r10
+    call sha256_add32
+    copy r10, r0
+    load r1, [fp-72]
+    copy r2, r11
+    call sha256_add32
+    copy r11, r0
+    load r1, [fp-64]
+    copy r2, r12
+    call sha256_add32
+    copy r12, r0
+    load r1, [fp-56]
+    copy r2, r13
+    call sha256_add32
+    copy r13, r0
+    load r1, [fp-48]
+    copy r2, r14
+    call sha256_add32
+    copy r14, r0
+    load r1, [fp-40]
+    copy r2, r15
+    call sha256_add32
+    copy r15, r0
+    leave
+    return
+
+// ===========================================================================
+// s_sha256(r1 = data, r2 = len, r3 = out) -> r0 = out
+//
+// Hashes len bytes at data (any length, 0 included), pads, and writes the
+// 32-byte digest to out. The hash state lives in r8..r15 for the whole
+// call; the public ABI saves r12..r15 around it.
+// ===========================================================================
+s_sha256:
+    push r12
+    push r13
+    push r14
+    push r15
+    enter 64
+    store [fp-8], r1            // data cursor
+    store [fp-16], r2           // remaining bytes
+    store [fp-24], r3           // out
+    store [fp-32], r2           // total bytes (for the length field)
+
+    // H := H_INIT
+    set r1, H_INIT
+    load r8, [r1+0]
+    load r9, [r1+8]
+    load r10, [r1+16]
+    load r11, [r1+24]
+    load r12, [r1+32]
+    load r13, [r1+40]
+    load r14, [r1+48]
+    load r15, [r1+56]
+
+    // full 64-byte blocks
+.blocks:
+    load r4, [fp-16]
+    set r5, 64
+    jump.lt r4, r5, .final
+    load r1, [fp-8]
+    set r3, 0
+    call sha256_block
+    load r4, [fp-8]
+    add r4, r4, 64
+    store [fp-8], r4
+    load r4, [fp-16]
+    sub r4, r4, 64
+    store [fp-16], r4
+    jump .blocks
+
+.final:
+    // rem = 0..63 bytes left
+    load r4, [fp-16]
+    set r5, 56
+    jump.ge r4, r5, .final_two
+    // fits in one padded block: data | 0x80 | zeros | length
+    load r1, [fp-8]
+    set r3, 1
+    load r5, [fp-32]
+    call sha256_block
+    jump .output
+
+.final_two:
+    // rem >= 56: one block with the 0x80 pad, then a length-only block
+    load r1, [fp-8]
+    set r3, 2
+    load r4, [fp-16]
+    load r5, [fp-32]
+    call sha256_block
+    set r1, 0
+    set r3, 3
+    set r4, 0
+    load r5, [fp-32]
+    call sha256_block
+
+.output:
+    // write H as 8 big-endian words
+    load r4, [fp-24]
+    copy r1, r8
+    copy r2, r4
+    call sha256_be32
+    copy r4, r0
+    copy r1, r9
+    copy r2, r4
+    call sha256_be32
+    copy r4, r0
+    copy r1, r10
+    copy r2, r4
+    call sha256_be32
+    copy r4, r0
+    copy r1, r11
+    copy r2, r4
+    call sha256_be32
+    copy r4, r0
+    copy r1, r12
+    copy r2, r4
+    call sha256_be32
+    copy r4, r0
+    copy r1, r13
+    copy r2, r4
+    call sha256_be32
+    copy r4, r0
+    copy r1, r14
+    copy r2, r4
+    call sha256_be32
+    copy r4, r0
+    copy r1, r15
+    copy r2, r4
+    call sha256_be32
+
+    load r0, [fp-24]
+    leave
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    return

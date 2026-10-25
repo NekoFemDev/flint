@@ -1,0 +1,103 @@
+// sha256 — NIST test vectors (FIPS 180-4).
+//
+// Expected output (one line per case):
+//   empty  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+//   abc    ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+//   long   248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+
+include "stdlib.flt"
+include "sha256.flt"
+
+data:
+empty:      bytes 1
+msg_abc:    str "abc"
+msg_long:   str "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+lbl_empty:  str "empty  ", 0
+lbl_abc:    str "abc    ", 0
+lbl_long:   str "long   ", 0
+hexdigits:  str "0123456789abcdef"
+hexbuf:     bytes 32
+hexout:     bytes 65
+
+code:
+main:
+    // empty string
+    set r1, lbl_empty
+    call s_print
+    set r1, empty
+    set r2, 0
+    set r3, hexbuf
+    call s_sha256
+    set r1, hexbuf
+    set r2, 32
+    call print_hex
+    call newline
+
+    // "abc"
+    set r1, lbl_abc
+    call s_print
+    set r1, msg_abc
+    set r2, 3
+    set r3, hexbuf
+    call s_sha256
+    set r1, hexbuf
+    set r2, 32
+    call print_hex
+    call newline
+
+    // 56 bytes: exercises the rem >= 56 two-block padding path
+    set r1, lbl_long
+    call s_print
+    set r1, msg_long
+    set r2, 56
+    set r3, hexbuf
+    call s_sha256
+    set r1, hexbuf
+    set r2, 32
+    call print_hex
+    call newline
+
+    set r0, 0
+    exit
+
+// print_hex(r1 = bytes, r2 = len) — lowercase hex, 2*len chars + NUL
+print_hex:
+    set r4, 0                   // i
+.ph_loop:
+    jump.eq r4, r2, .ph_done
+    copy r5, r1
+    add r5, r5, r4
+    load.byte r6, [r5+0]        // input byte
+    copy r7, r4
+    shl r7, r7, 1               // out index = i * 2
+    set r8, hexout
+    add r8, r8, r7
+    // high nibble
+    copy r5, r6
+    shr r5, r5, 4
+    set r7, hexdigits
+    add r7, r7, r5
+    load.byte r5, [r7+0]
+    store.byte [r8+0], r5
+    // low nibble
+    and r6, r6, 15
+    set r7, hexdigits
+    add r7, r7, r6
+    load.byte r6, [r7+0]
+    store.byte [r8+1], r6
+    inc r4
+    jump .ph_loop
+.ph_done:
+    set r1, hexout
+    shl r2, r2, 1               // len * 2 chars
+    set r6, 0
+    add r8, r1, r2
+    store.byte [r8+0], r6       // NUL terminator
+    call s_print
+    return
+
+newline:
+    set r0, 10
+    sys 1
+    set r0, 0
+    return
