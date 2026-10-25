@@ -7,6 +7,7 @@
  *   flint check <file.flt|file.fbc> assemble/validate without running
  *   flint check [dir]      check a project (default: cwd)
  *   flint dis <file.flt|file.fbc>   print bytecode disassembly
+ *   flint repl             interactive REPL: state persists between lines
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +33,8 @@ static void usage(FILE *o)
         "  flint check <file.flt|file.fbc> assemble/validate without running\n"
         "  flint check [dir]      check a project (default: cwd)\n"
         "  flint dis <file.flt|file.fbc>   print bytecode disassembly\n"
+        "  flint repl             interactive REPL: one statement per\n"
+        "                         line, VM state persists between lines\n"
         "  flint --version\n"
         "\n"
         "memory model: manual (`alloc` = bump arena; `free` a no-op) or auto\n"
@@ -220,6 +223,8 @@ int main(int argc, char **argv)
         return flint_cli_cmd_check(argc >= 3 ? argv[2] : 0);
     if (strcmp(cmd, "dis") == 0)
         return flint_cli_cmd_dis(argc >= 3 ? argv[2] : 0);
+    if (strcmp(cmd, "repl") == 0)
+        return flint_repl();
 
     /* convenience: `flint path/file.flt` == `flint run path/file.flt` */
     if (has_flint_ext_public(cmd))

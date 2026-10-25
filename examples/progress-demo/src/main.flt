@@ -19,7 +19,7 @@ code:
 main:
     // initial time for ETA
     set r0, 8
-    sys 8
+    sys 10
     set r1, start
     store [r1], r0
 

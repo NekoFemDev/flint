@@ -79,10 +79,18 @@ flint run <file.flt|file.fbc> --threads N    N VM instances in N OS threads
 flint check <file.flt|file.fbc>          assemble/validate without executing
 flint check [dir]                        check a project
 flint dis <file.flt|file.fbc>            print bytecode disassembly
+flint repl                               interactive REPL (state persists)
 flint --version
 ```
 
 Shortcut: `flint path/file.flt` ≡ `flint run path/file.flt` (same for `.fbc`).
+
+`flint repl` opens an interactive session: one statement per line,
+assembled and run on a live VM whose registers, memory and heap persist
+between lines (`sys 11` dumps the registers; `exit` or EOF closes). Each
+line is wrapped into a little program — the REPL supplies `main:` and a
+trailing `exit` when the line brings neither — so labels resolve only
+within their line, and a line that never halts is stopped at 1000 steps.
 
 `run` options: `--gc-stats` prints a collector report to stderr after the
 run; `--gc-stress` forces a collection before every allocation;
@@ -573,13 +581,17 @@ image bounds. File results are POSIX descriptors; failures return −1.
 | 4    | read      | r0 = fd, r1 = buffer in `mem`, r2 = max bytes | r0 = bytes read (0 on EOF) or −1 |
 | 5    | write     | r0 = fd, r1 = buffer in `mem`, r2 = bytes | r0 = bytes written or −1 |
 | 6    | close     | r0 = fd       | r0 = 0 or −1                   |
-| 8    | time      | —             | r0 = UNIX epoch seconds        |
-| 9    | regs      | —             | debug: print r0..r15, one per line (not part of the stable ABI) |
+| 7    | stat      | r0 = NUL-terminated path in `mem`, r1 = 8-byte buffer in `mem` | r0 = 0 or −1; the file size (int64) is written to the buffer |
+| 8    | mkdir     | r0 = NUL-terminated path in `mem`, r1 = mode (e.g. 0755) | r0 = 0 or −1 |
+| 9    | unlink    | r0 = NUL-terminated path in `mem` | r0 = 0 or −1 |
+| 10   | time      | —             | r0 = UNIX epoch seconds        |
+| 11   | regs      | —             | debug: print r0..r15, one per line (not part of the stable ABI) |
 
 `open` flags: `0` = read-only; `1` = write, creating/truncating the file.
-Slots 0..6 are the standard set (`FLINT_SYS_*` in `flint.h`); 8..9 are the
-CLI extensions. Slots 7 and 10..63 stay free for embedding hosts. Calling
-an unfilled slot is a predictable `NOSYS` trap.
+Slots 0..6 are the standard set (`FLINT_SYS_*` in `flint.h`); 7..11 are the
+CLI extensions (7..9 file metadata — stat/mkdir/unlink — and 10..11
+time/debug). Slots 12..63 stay free for embedding hosts. Calling an
+unfilled slot is a predictable `NOSYS` trap.
 
 Common recipes:
 
@@ -587,8 +599,9 @@ Common recipes:
 sys 0           // print a memory span (r1 = addr, r2 = len) — stdlib s_print
 sys 1           // putc: low byte of r0
 sys 2           // manual stdin reading, one character at a time
-sys 9           // debug: dump registers mid-run
+sys 11          // debug: dump registers mid-run
 sys 3/4/5/6     // file round-trip: open(path) -> read/write(buf, n) -> close
+sys 7/8/9       // file metadata: stat(path, buf) / mkdir(path, mode) / unlink(path)
 ```
 
 ---
@@ -618,13 +631,13 @@ flint_prog_free(&p);
 ### Custom syscalls
 
 ```c
-static void my_double(flint_vm *vm)   /* sys 10: r0 = r0 * 2 */
+static void my_double(flint_vm *vm)   /* sys 12: r0 = r0 * 2 */
 {
     vm->r[0] *= 2;
 }
 
 /* before the run: */
-flint_sys_set(&vm, 10, my_double);
+flint_sys_set(&vm, 12, my_double);
 ```
 
 ### Step-by-step mode

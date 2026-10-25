@@ -1,4 +1,4 @@
-// register dump: r0..r15 loaded 15..0, debug sys 9 prints them;
+// register dump: r0..r15 loaded 15..0, debug sys 11 prints them;
 // the dump now covers the full expanded register file
 code:
 main:
@@ -18,6 +18,6 @@ main:
     set r13, 2
     set r14, 1
     set r15, 0
-    sys 9                  // regs -> "r0 = 15" .. "r15 = 0"
+    sys 11                 // regs -> "r0 = 15" .. "r15 = 0"
     set r0, 0
     exit

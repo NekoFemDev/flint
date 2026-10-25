@@ -12,12 +12,20 @@
  *   4  read       r0 = fd, r1 = buf, r2 = len -> bytes or -1
  *   5  write      r0 = fd, r1 = buf, r2 = len -> bytes or -1
  *   6  close      r0 = fd -> 0 or -1
- *   8  time       -> r0 = epoch seconds
- *   9  regs       debug dump r0..r15 (not part of the stable ABI)
- * Slots 0..6 are the generic standard set (flint.h FLINT_SYS_*). */
+ *   7  stat       r0 = path addr, r1 = out buf (8 bytes); the file size
+ *                 (int64) lands in the buffer -> 0, or -1 on error
+ *   8  mkdir      r0 = path addr, r1 = mode (e.g. 0755) -> 0 or -1
+ *   9  unlink     r0 = path addr -> 0 or -1
+ *   10 time       -> r0 = epoch seconds
+ *   11 regs       debug dump r0..r15 (not part of the stable ABI)
+ * Slots 0..6 are the generic standard set (flint.h FLINT_SYS_*); 7..9 are
+ * the CLI file-meta set; 10..11 are the CLI time/debug extensions. */
 enum {
-    CLI_SYS_TIME = 8,
-    CLI_SYS_REGS = 9
+    CLI_SYS_STAT   = 7,
+    CLI_SYS_MKDIR  = 8,
+    CLI_SYS_UNLINK = 9,
+    CLI_SYS_TIME   = 10,
+    CLI_SYS_REGS   = 11
 };
 
 void flint_cli_sysoff(flint_vm *vm);
@@ -42,6 +50,13 @@ int flint_cli_check_file(const char *path, const char *include_root);
 /* bytecode-image front-end (.fbc written by `flint build`): execute the
  * stored code+mem images directly, no assembler at run time */
 int flint_cli_run_image(const char *path);
+
+/* interactive REPL (flint repl): assemble and run one statement per line
+ * on a persistent 64 KiB VM — registers, memory and the heap survive
+ * between lines; each line gets a 1000-step budget; `sys 11` (regs)
+ * dumps the registers. `exit` alone, or EOF, ends the session. Returns 0
+ * when the session closes cleanly, 2 on allocation failure. */
+int flint_repl(void);
 
 /* run options (flint run --gc-stats --gc-stress --memory ...).
  * gc_stress also comes from FLINT_GC_STRESS=1 / gc_stats from

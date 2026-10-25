@@ -124,7 +124,7 @@ s_progress_eta:                       // r1 = start, r2 = done, r3 = total -> r0
     copy r4, r3                       // remaining = total - done
     sub r4, r4, r2
     set r0, 8                         // sys time
-    sys 8                             // r0 = now
+    sys 10                            // r0 = now
     sub r5, r0, r1                    // elapsed
     jump.lt r5, 1, .eta_zero          // elapsed <= 0
     mul r4, r4, r5

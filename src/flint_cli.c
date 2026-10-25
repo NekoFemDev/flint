@@ -76,7 +76,7 @@ static void std_open(flint_vm *vm)
     vm->r[0] = (fd < 0) ? (flint_word)-1 : (flint_word)fd;
 }
 
-/* SYS 9 (CLI_SYS_REGS, debug): dump r0..r15, one per line */
+/* SYS 11 (CLI_SYS_REGS, debug): dump r0..r15, one per line */
 static void std_regs(flint_vm *vm)
 {
     int i;
@@ -148,7 +148,52 @@ static void std_close(flint_vm *vm)
     vm->r[0] = (close((int)fd) == 0) ? 0 : -1;
 }
 
-/* SYS 8: time -> r0 = UNIX epoch seconds */
+/* SYS 7 (CLI_SYS_STAT): r0 = path address in mem, r1 = 8-byte result
+ * buffer in mem. The file size is written to the buffer as int64 (the
+ * same little-endian byte order words use in memory); the path must be
+ * NUL-terminated inside the image. r0 = 0 on success, -1 on error. */
+static void std_stat(flint_vm *vm)
+{
+    struct stat st;
+    flint_word size;
+
+    if (clif_strn(vm, vm->r[0]) < 0 ||
+        !clif_span(vm, vm->r[1], (flint_word)sizeof(flint_word)) ||
+        stat((const char *)(vm->mem + vm->r[0]), &st) != 0) {
+        vm->r[0] = -1;
+        return;
+    }
+    size = (flint_word)st.st_size;
+    memcpy(vm->mem + vm->r[1], &size, sizeof size);
+    vm->r[0] = 0;
+}
+
+/* SYS 8 (CLI_SYS_MKDIR): r0 = path address in mem, r1 = mode (e.g.
+ * 0755). r0 = 0 on success, -1 on error. */
+static void std_mkdir(flint_vm *vm)
+{
+    if (clif_strn(vm, vm->r[0]) < 0 ||
+        mkdir((const char *)(vm->mem + vm->r[0]),
+              (mode_t)vm->r[1]) != 0) {
+        vm->r[0] = -1;
+        return;
+    }
+    vm->r[0] = 0;
+}
+
+/* SYS 9 (CLI_SYS_UNLINK): r0 = path address in mem; remove the file.
+ * r0 = 0 on success, -1 on error. */
+static void std_unlink(flint_vm *vm)
+{
+    if (clif_strn(vm, vm->r[0]) < 0 ||
+        unlink((const char *)(vm->mem + vm->r[0])) != 0) {
+        vm->r[0] = -1;
+        return;
+    }
+    vm->r[0] = 0;
+}
+
+/* SYS 10 (CLI_SYS_TIME): time -> r0 = UNIX epoch seconds */
 static void std_time(flint_vm *vm)
 {
     vm->r[0] = (flint_word)time(NULL);
@@ -156,7 +201,7 @@ static void std_time(flint_vm *vm)
 
 void flint_cli_sysoff(flint_vm *vm)
 {
-    /* ABI slots 0..6 (flint.h); time/debug extensions 8..9 */
+    /* ABI slots 0..6 (flint.h); file-meta 7..9; time/debug 10..11 */
     flint_sys_set(vm, FLINT_SYS_PRINT_STR, std_print_str);
     flint_sys_set(vm, FLINT_SYS_PUTC,      std_putc);
     flint_sys_set(vm, FLINT_SYS_GETC,      std_getc);
@@ -164,6 +209,9 @@ void flint_cli_sysoff(flint_vm *vm)
     flint_sys_set(vm, FLINT_SYS_READ,      std_read);
     flint_sys_set(vm, FLINT_SYS_WRITE,     std_write);
     flint_sys_set(vm, FLINT_SYS_CLOSE,     std_close);
+    flint_sys_set(vm, CLI_SYS_STAT,        std_stat);
+    flint_sys_set(vm, CLI_SYS_MKDIR,       std_mkdir);
+    flint_sys_set(vm, CLI_SYS_UNLINK,      std_unlink);
     flint_sys_set(vm, CLI_SYS_TIME,        std_time);
     flint_sys_set(vm, CLI_SYS_REGS,        std_regs);
 }
@@ -534,6 +582,108 @@ static int run_image_opts(const char *path, const flint_run_opts *o)
 int flint_cli_run_image(const char *path)
 {
     return run_image_opts(path, 0);
+}
+
+/* ---------------- interactive REPL ---------------- */
+
+/* `flint repl`: read one source statement per line, assemble it into a
+ * throwaway image and run it on a VM that survives between lines —
+ * registers, memory and the heap persist, so `set r0, 1` on one line is
+ * still in r0 on the next. Each line is a complete little program: the
+ * REPL supplies the `main:` entry label and a trailing `exit` unless the
+ * line brings its own `main:`, so labels only ever resolve within their
+ * line. A line gets a fresh step budget (REPL_MAX_STEPS) so a runaway
+ * loop cannot lock the session; `sys 11` (regs) dumps the registers.
+ * `exit` alone, or EOF, ends the session. */
+#define REPL_MEM_SIZE   65536u   /* persistent image: data + heap + stack */
+#define REPL_MAX_STEPS  1000u    /* per-line instruction budget           */
+
+int flint_repl(void)
+{
+    flint_byte *mem = (flint_byte *)calloc(1, REPL_MEM_SIZE);
+    flint_vm vm;
+    char line[2048];
+    char src[2048 + 32];
+    int ready = 0;
+
+    if (!mem) {
+        fprintf(stderr, "flint repl: out of memory\n");
+        return 2;
+    }
+
+    for (;;) {
+        flint_prog p;
+        char err[384];
+        int oversize;
+
+        /* prompt, read one line; EOF closes the session like `exit` */
+        fputs("> ", stdout);
+        fflush(stdout);
+        if (!fgets(line, sizeof line, stdin)) break;
+        oversize = !strchr(line, '\n') && !feof(stdin);
+        line[strcspn(line, "\r\n")] = 0;            /* chomp the EOL */
+        if (oversize) {                             /* drop the rest  */
+            int c;
+            while ((c = fgetc(stdin)) != EOF && c != '\n') { }
+            fprintf(stderr, "flint repl: line too long, skipped\n");
+            continue;
+        }
+        if (line[0] == 0) continue;                 /* blank line     */
+        if (strcmp(line, "exit") == 0) break;
+
+        /* wrap into a runnable program unless the line has a main:.
+         * The closing `code:` matters: a line may end inside data:. */
+        if (strstr(line, "main:") != 0)
+            snprintf(src, sizeof src, "%s\ncode:\n    exit\n", line);
+        else
+            snprintf(src, sizeof src, "main:\n%s\ncode:\n    exit\n", line);
+
+        if (flint_assemble_ctx(src, "<repl>", 0, 0, &p, 0,
+                               err, sizeof err) != 0) {
+            fprintf(stderr, "flint repl: %s\n", err);
+            continue;
+        }
+
+        if (!ready) {
+            /* first line: VM comes alive on the persistent memory */
+            flint_init(&vm, p.code, p.code_size, mem, REPL_MEM_SIZE);
+            flint_heap_set(&vm, p.heap_start, FLINT_MEM_MANUAL);
+            flint_cli_sysoff(&vm);
+            ready = 1;
+        } else {
+            /* next line: new code image, same registers/memory/heap */
+            vm.code      = p.code;
+            vm.code_size = p.code_size;
+        }
+
+        /* refresh the line's data section: it starts at offset 0, the
+         * exact offsets the assembler encoded into the code. Bytes above
+         * it (heap blocks, stack) stay untouched unless the new data
+         * section is large enough to reach into them. */
+        if (p.heap_start > 0) memcpy(mem, p.mem, p.heap_start);
+        if (p.heap_start > vm.heap_start) vm.heap_start = p.heap_start;
+        if (vm.heap_ptr < vm.heap_start) vm.heap_ptr = vm.heap_start;
+
+        vm.steps = 0;                  /* budget is per line, not cumulative */
+        vm.max_steps = REPL_MAX_STEPS;
+        vm.err = FLINT_OK;
+        vm.err_text = 0;
+        (void)flint_run(&vm, p.entry);
+
+        if (vm.err == FLINT_ERR_LIMIT)
+            fprintf(stderr, "flint repl: step limit hit (%u steps)\n",
+                    REPL_MAX_STEPS);
+        else if (vm.err)
+            fprintf(stderr, "flint repl: %s\n",
+                    vm.err_text ? vm.err_text : flint_errno(vm.err));
+
+        /* vm.code dangles until the next line replaces it — harmless: the
+         * VM is only ever stepped again after vm.code is re-pointed */
+        flint_prog_free(&p);
+    }
+
+    free(mem);
+    return 0;
 }
 
 int flint_cli_check_file(const char *path,
