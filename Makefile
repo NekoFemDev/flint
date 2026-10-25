@@ -12,7 +12,7 @@ all: $(BIN) $(STUB)
 
 $(BIN): $(SRC) src/main.c src/flint_dis.c include/flint.h include/flint_cli.h include/flint_img.h include/flint_stub.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) $(SRC) src/flint_dis.c src/main.c -o $@
+	$(CC) $(CFLAGS) -pthread $(SRC) src/flint_dis.c src/main.c -o $@
 
 # `flint build --elf` fuses this stub with the program's images into one
 # standalone executable — see include/flint_stub.h for the layout.
@@ -40,7 +40,7 @@ $(STUB): src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cl
          src/flint_img.c src/flint_dis.c \
          include/flint.h include/flint_cli.h include/flint_img.h include/flint_stub.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) $(STUB_LDFLAGS) -o $@ \
+	$(CC) $(CFLAGS) $(STUB_LDFLAGS) -pthread -o $@ \
 	  src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
 	  src/flint_img.c src/flint_dis.c
 
@@ -83,6 +83,16 @@ test: $(TESTS) $(BIN) $(STUB)
 	  && ./$(BIN) tests/crc32c_test.flt | grep -q "fox 22620404" \
 	  && ./$(BIN) tests/crc32c_test.flt | grep -q "abc 364b3fb7" \
 	  && ./$(BIN) tests/crc32c_test.flt | grep -q "incremental e3069283" \
+	  && ./$(BIN) tests/sha256_test.flt | grep -q "e3b0c44298fc1c149afbf4c8996fb924" \
+	  && ./$(BIN) tests/sha256_test.flt | grep -q "ba7816bf8f01cfea414140de5dae2223" \
+	  && ./$(BIN) tests/sha256_test.flt | grep -q "248d6a61d20638b8e5c026930c3e6039" \
+	  && test "$$(./$(BIN) run tests/hello.flt --threads 4 | grep -c 'Hello, FLINT!')" = "4" \
+	  && ./$(BIN) tests/base64_test.flt | grep -q "^foobar:Zm9vYmFy$$" \
+	  && ./$(BIN) tests/base64_test.flt | grep -q "^f:Zg==$$" \
+	  && ./$(BIN) tests/base64_test.flt | grep -q "^d1:f$$" \
+	  && ./$(BIN) tests/base64_test.flt | grep -q "^ws:foobar$$" \
+	  && ./$(BIN) tests/base64_test.flt | grep -q "^bad4:err$$" \
+	  && ./$(BIN) tests/base64_test.flt | grep -q "^rt:ok$$" \
 	  && ./$(BIN) tests/progress_test.flt | grep -q "0%" \
 	  && ./$(BIN) tests/progress_test.flt | grep -q "25%" \
 	  && ./$(BIN) tests/progress_test.flt | grep -q "50%" \
