@@ -66,6 +66,18 @@ int flint_cli_cmd_run(const char *arg);   /* .flt file or project dir */
 int flint_cli_cmd_check(const char *arg);
 int flint_cli_cmd_dis(const char *arg);
 
+/* host-level parallelism: run the same program in num_threads OS threads,
+ * each with its OWN flint_vm — every worker reads (or assembles) its own
+ * copy of the file, so code, memory and stack are fully isolated and the
+ * only shared state is stdout/stderr. filename must be a .flt source or
+ * a .fbc image; stack_size clamps like a project's [stack] and is the
+ * assembler stack reserve for .flt sources (ignored for .fbc images).
+ * Returns 0 when every worker finished with r0 == 0, the first non-zero
+ * r0 in thread order otherwise, -(FLINT_ERR_*) on a VM trap, or 2 on a
+ * file/argument failure. */
+int flint_run_parallel(const char *filename, int num_threads,
+                       uint32_t stack_size);
+
 /* disassembler (flint_dis.c): decode code image to stdout, 0 on ok */
 int flint_dis(const flint_byte *code, uint32_t n);
 

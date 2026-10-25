@@ -9,6 +9,7 @@
  *   flint dis <file.flt|file.fbc>   print bytecode disassembly
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "flint.h"
 #include "flint_cli.h"
@@ -25,6 +26,9 @@ static void usage(FILE *o)
         "  flint run <file.flt|file.fbc>   run source, or a built image\n"
         "  flint run [dir]        run a project (default: cwd)\n"
         "           [--gc-stats] [--gc-stress] [--memory auto|manual]\n"
+        "  flint run <file> --threads N    run N isolated VM instances in\n"
+        "                                  N OS threads (each reads and runs\n"
+        "                                  its own copy of the program)\n"
         "  flint check <file.flt|file.fbc> assemble/validate without running\n"
         "  flint check [dir]      check a project (default: cwd)\n"
         "  flint dis <file.flt|file.fbc>   print bytecode disassembly\n"
@@ -116,18 +120,37 @@ static int cmd_build_args(int argc, char **argv)
     return flint_cli_cmd_build(in, out, elf);
 }
 
-/* flint run [file|dir] [--gc-stats] [--gc-stress] [--memory auto|manual] */
+/* flint run [file|dir] [--gc-stats] [--gc-stress] [--memory auto|manual]
+ *           [file --threads N] */
 static int cmd_run_args(int argc, char **argv)
 {
     flint_run_opts o;
     const char *arg = 0;
+    int threads = 0, threads_given = 0;
     int i;
 
     o.gc_stats = 0; o.gc_stress = 0;
     o.memory_given = 0; o.memory = FLINT_MEM_MANUAL;
 
     for (i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "--gc-stats") == 0) {
+        if (strcmp(argv[i], "--threads") == 0 ||
+            strncmp(argv[i], "--threads=", 10) == 0) {
+            const char *val = argv[i][9] ? argv[i] + 10 : 0;
+            char *end;
+            if (!val) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "flint run: --threads needs a number\n");
+                    return 2;
+                }
+                val = argv[++i];
+            }
+            threads = (int)strtol(val, &end, 10);
+            if (*val == 0 || *end != 0 || threads < 1) {
+                fprintf(stderr, "flint run: --threads wants a count >= 1\n");
+                return 2;
+            }
+            threads_given = 1;
+        } else if (strcmp(argv[i], "--gc-stats") == 0) {
             o.gc_stats = 1;
         } else if (strcmp(argv[i], "--gc-stress") == 0) {
             o.gc_stress = 1;
@@ -154,6 +177,19 @@ static int cmd_run_args(int argc, char **argv)
             fprintf(stderr, "flint run: unexpected argument %s\n", argv[i]);
             return 2;
         }
+    }
+
+    if (threads_given) {
+        if (o.gc_stats || o.gc_stress || o.memory_given) {
+            fprintf(stderr, "flint run: --threads cannot be combined with "
+                            "--gc-stats/--gc-stress/--memory\n");
+            return 2;
+        }
+        if (arg == 0) {
+            fprintf(stderr, "flint run: --threads needs a .flt or .fbc file\n");
+            return 2;
+        }
+        return flint_run_parallel(arg, threads, 65536);
     }
     return flint_cli_cmd_run_opts(arg, &o);
 }

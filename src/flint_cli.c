@@ -11,6 +11,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "flint.h"
@@ -587,6 +588,135 @@ int flint_cli_cmd_run_opts(const char *arg, const flint_run_opts *o)
 int flint_cli_cmd_run(const char *arg)
 {
     return flint_cli_cmd_run_opts(arg, 0);
+}
+
+/* ---------------- host-level parallelism ---------------- */
+
+/* One worker per OS thread. Every worker reads (or assembles) its own
+ * copy of the program and builds a private flint_vm — the VM has no
+ * global state, so code, memory and stack are isolated; the only thing
+ * shared is stdout/stderr (and thus interleaved output). */
+typedef struct {
+    const char *path;
+    uint32_t    stack;      /* assembler stack reserve for .flt sources */
+    int         rc;         /* r0 at HLT (0 = clean)                    */
+    int         trap;       /* FLINT_ERR_* code, 0 = none               */
+    int         bad;        /* 1 = file/assemble failure                */
+    char        err[384];   /* failure text (reported for the first one) */
+} flint_pworker;
+
+static void *flint_pworker_main(void *ud)
+{
+    flint_pworker *w = (flint_pworker *)ud;
+    flint_prog p;
+    flint_mem_mode mem = FLINT_MEM_MANUAL;
+    flint_vm vm;
+    flint_word rc;
+
+    if (has_fbc_ext(w->path)) {
+        if (flint_img_load(w->path, &p, &mem, w->err, sizeof w->err) != 0) {
+            w->bad = 1;
+            return 0;
+        }
+    } else {
+        long len;
+        char *src = read_whole(w->path, &len);
+        inc_ctx ic;
+        if (!src) {
+            snprintf(w->err, sizeof w->err, "%s: %s",
+                     w->path, strerror(errno));
+            w->bad = 1;
+            return 0;
+        }
+        inc_ctx_init(&ic, 0);
+        if (flint_assemble_ctx(src, w->path, inc_load, &ic, &p, w->stack,
+                               w->err, sizeof w->err) != 0) {
+            free(src);
+            inc_ctx_free(&ic);
+            w->bad = 1;
+            return 0;
+        }
+        free(src);
+        inc_ctx_free(&ic);
+    }
+
+    flint_init(&vm, p.code, p.code_size, p.mem, p.mem_size);
+    flint_heap_set(&vm, p.heap_start, mem);
+    flint_cli_sysoff(&vm);
+    rc = flint_run(&vm, p.entry);
+
+    if (vm.err != FLINT_OK) {
+        w->trap = vm.err;
+        snprintf(w->err, sizeof w->err, "runtime: %s",
+                 vm.err_text ? vm.err_text : flint_errno(vm.err));
+    } else {
+        w->rc = (int)(rc & 0x7FFFFFFF);
+    }
+    flint_prog_free(&p);
+    return 0;
+}
+
+/* see flint_cli.h for the contract */
+int flint_run_parallel(const char *filename, int num_threads,
+                       uint32_t stack_size)
+{
+    pthread_t *tid;
+    flint_pworker *w;
+    int i, started = 0, rc = 0, first_err = -1;
+
+    if (!filename) {
+        fprintf(stderr, "flint run: --threads needs a file\n");
+        return 2;
+    }
+    if (num_threads < 1 || num_threads > 1024) {
+        fprintf(stderr, "flint run: --threads wants a count in 1..1024\n");
+        return 2;
+    }
+    if (!has_flint_ext(filename) && !has_fbc_ext(filename)) {
+        fprintf(stderr,
+                "flint run: --threads: %s: not a .flt or .fbc file\n",
+                filename);
+        return 2;
+    }
+
+    tid = (pthread_t *)malloc(sizeof *tid * (size_t)num_threads);
+    w = (flint_pworker *)calloc((size_t)num_threads, sizeof *w);
+    if (!tid || !w) {
+        free(tid);
+        free(w);
+        fprintf(stderr, "flint run: out of memory\n");
+        return 2;
+    }
+
+    for (i = 0; i < num_threads; i++) {
+        w[i].path = filename;
+        w[i].stack = clamp_stack((long)stack_size);
+        if (pthread_create(&tid[i], 0, flint_pworker_main, &w[i]) != 0) {
+            fprintf(stderr, "flint run: pthread_create failed\n");
+            rc = 2;
+            break;
+        }
+        started++;
+    }
+
+    for (i = 0; i < started; i++) pthread_join(tid[i], 0);
+
+    if (rc == 0 && started == num_threads) {
+        for (i = 0; i < started; i++)
+            if (w[i].bad) { first_err = i; rc = 1; break; }
+        if (rc == 0)
+            for (i = 0; i < started; i++)
+                if (w[i].trap) { first_err = i; rc = -w[i].trap; break; }
+        if (rc == 0)
+            for (i = 0; i < started; i++)
+                if (w[i].rc != 0) { rc = w[i].rc; break; }
+    }
+    if (first_err >= 0)
+        fprintf(stderr, "flint: %s\n", w[first_err].err);
+
+    free(tid);
+    free(w);
+    return rc;
 }
 
 int flint_cli_cmd_check(const char *arg)
