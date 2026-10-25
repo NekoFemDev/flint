@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.4.0-pre.7 — 2026-10-26
+
+### Added
+
+- **Program arguments and environment** (sys 12..14): `flint run prog.flt
+  a b` now passes `a b` to the program. `argc` counts them, `getarg`
+  copies one into a VM buffer (returns the full length; truncates to
+  capacity−1 bytes), `getenv` looks up an environment variable. The
+  standalone ELF stub exposes its own process arguments the same way;
+  `--threads` runs take no program arguments.
+- **File/directory syscalls** (sys 15..20): `lseek` (set/current/end),
+  `rename`, `rmdir`, and `opendir`/`readdir`/`closedir` over a fixed
+  8-handle table (`.`/`..` passed through like any entry). `open` gains
+  flag `2` = append (creates the file when missing).
+- **`lib/string.flt` helpers**: `s_atoi` (string → int64; skips
+  whitespace, optional sign, stops at the first non-digit, wraps),
+  `s_find` (substring index or −1; empty needle matches at 0), `s_chr`
+  (byte index or −1; searching 0 finds the terminator), `s_starts_with`,
+  `s_ends_with` (1/0; empty pattern matches), `s_trim` (in-place
+  space/tab/CR/LF), `s_reverse` (in-place).
+- **`lib/math.flt`** (new): `s_abs`, `s_min`, `s_max`, `s_clamp`,
+  `s_gcd`, `s_lcm`, `s_isqrt` (floor square root), `s_pow`
+  (exponentiation by squaring; negative exponent → 0), `s_lcg` (one
+  64-bit LCG step — feed the state back for a PRNG) and `s_hash64`
+  (splitmix64 finalizer for stateless hashing). Wrapping int64
+  arithmetic, no allocation, reentrant.
+- **Tests**: `tests/string_test.flt` (32 checks over every string
+  helper), `tests/math_test.flt`, `tests/fsops.flt`
+  (append/lseek/rename/rmdir/readdir round-trip) and `tests/args.flt`
+  (argc/getarg/getenv); all wired into `make test`.
+
+### Changed
+
+- The README syscall table documents slots 7..20 and `open` flag 2;
+  slots 21..63 stay free for embedding hosts.
+
 ## 0.4.0-pre.6 — 2026-10-26
 
 ### Added
