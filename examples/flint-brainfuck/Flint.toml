@@ -1,0 +1,5 @@
+[project]
+name = "flint-brainfuck"
+entry = "src/main.flt"
+stack = 65536
+memory = "auto"

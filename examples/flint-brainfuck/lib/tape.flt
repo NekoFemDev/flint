@@ -1,0 +1,56 @@
+// tape.flt — Brainfuck tape (30000 zeroed bytes).
+//
+// Convention (set by the caller before any tape call):
+//   r3 = tape base address
+//   r4 = current cell address
+//
+// Cell values are bytes; load/store are byte operations so values wrap
+// naturally (255 + 1 -> 0, 0 - 1 -> 255).
+
+code:
+
+// tape_cell() -> r0 = byte at the current cell
+tape_cell:
+    load.byte r0, [r4+0]
+    return
+
+// tape_store(r1 = byte) -> store r1 into the current cell
+tape_store:
+    store.byte [r4+0], r1
+    return
+
+// tape_inc() -> increment the current cell
+tape_inc:
+    load.byte r0, [r4+0]
+    inc r0
+    store.byte [r4+0], r0
+    return
+
+// tape_dec() -> decrement the current cell
+tape_dec:
+    load.byte r0, [r4+0]
+    dec r0
+    store.byte [r4+0], r0
+    return
+
+// tape_next() -> move the data pointer one cell right
+//   exits with code 253 on tape overrun
+tape_next:
+    add r4, r4, 1
+    set r5, 30000
+    add r6, r3, r5            // r6 = tape end (base + 30000)
+    jump.hs r4, r6, .tn_oob   // unsigned: r4 >= end -> overrun
+    return
+.tn_oob:
+    set r0, 253
+    exit
+
+// tape_prev() -> move the data pointer one cell left
+//   exits with code 254 on tape underrun
+tape_prev:
+    sub r4, r4, 1
+    jump.lt r4, r3, .tp_oob   // signed:  r4 < base -> underrun
+    return
+.tp_oob:
+    set r0, 254
+    exit

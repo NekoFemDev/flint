@@ -1,4 +1,4 @@
-# FLINT 0.4.0-pre.3
+# FLINT 0.4.0-pre.4
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.
@@ -129,11 +129,16 @@ $ flint dis demo/src/main.flt
 ### Bytecode images (.fbc)
 
 `flint build` resolves `include`s, assembles the program and packs the
-result into one binary — the only artifact needed to run it:
+result into one binary — the only artifact needed to run it. Status output
+is Cargo-style: the include tree it resolved, then the artifact with its
+size and build time (colored on a terminal; `NO_COLOR` disables that):
 
 ```
 $ flint build examples/bench_fact
-flint: built build/bench_fact.fbc (173 code bytes, 65584 mem bytes, memory = auto)
+   Compiling bench_fact [auto]
+   src/main.flt
+   └── lib/fib.flt
+    Finished build/bench_fact.fbc (64.2 KiB) in 1ms
 $ flint run build/bench_fact.fbc
 bench_fact: ok
 ```
@@ -169,7 +174,9 @@ stub first (`build/stub.elf`); a missing stub is a build error:
 
 ```
 $ flint build --elf examples/b64-demo
-[OK] Standalone ELF: target/b64-demo
+   Compiling b64-demo [manual]
+   src/main.flt
+    Finished target/b64-demo (145.0 KiB) in 1ms
 $ printf 'foobar' | ./target/b64-demo
 Zm9vYmFy
 ```
@@ -292,7 +299,9 @@ that was already included once:
 ```
 
 Embedding hosts decide where includes come from: `flint_assemble_ctx`
-takes a resolver callback per file, while `flint_pp_includes()` is a
+takes a resolver callback per file — it gets the path as written plus the
+including file's directory and name, which is how the CLI builds the
+dependency tree above — while `flint_pp_includes()` is a
 standalone textual preprocessor (fopen, depth-capped at 10) for hosts
 without a resolver.
 
@@ -697,10 +706,21 @@ examples/b64-mem/        same encoder, chunked: allocs a fresh input block + out
                          run/.fbc/ELF; the same program in manual mode dies at
                          the 10th chunk (36 KiB of output, rc=251).
                          `sh tests/gc.sh` diffs every path.
+examples/hexdump/        `hexdump -C` clone: 4 KiB chunks on the auto heap (the
+                         collector reclaims each previous one), offset / hex /
+                         ASCII columns; byte-identical to `hexdump -C` from
+                         empty input to 1 MiB.
+examples/flint-brainfuck/ Brainfuck interpreter across four `lib/` modules
+                         (io / tape / execute / bracket) — the multi-include
+                         demo for `flint build`'s dependency tree:
+                         `flint run examples/flint-brainfuck < prog.bf`
+                         (try `examples/flint-brainfuck/examples/hello.bf`).
 ```
 
-Run the demo: `printf 'foobar' | flint run examples/b64-demo` → `Zm9vYmFy`;
-it also fuses into a standalone ELF (`flint build --elf examples/b64-demo`).
+Run the demos: `printf 'foobar' | flint run examples/b64-demo` → `Zm9vYmFy`;
+`printf 'foobar' | flint run examples/hexdump` → the `hexdump -C` dump;
+b64-demo also fuses into a standalone ELF
+(`flint build --elf examples/b64-demo`).
 
 Run one: `flint run tests/sum.flt` — or all of them: `make test`.
 `make bench` builds both examples with `flint build` and compares

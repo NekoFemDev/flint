@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.4.0-pre.4 — 2026-10-25
+
+### Added
+
+- **`flint build` prints a Cargo-style dependency tree**: `Compiling
+  <name> [<memory>]`, the resolved include tree (`├──` / `└──`), then
+  `Finished <out> (<size> KiB) in <ms>`. `Compiling` is bold cyan and
+  `Finished` green, on a terminal only (`NO_COLOR` opts out). Each file
+  appears once, under its first includer (matching the resolver's
+  include-once semantics); paths are shown relative to the project root,
+  then the cwd. `--elf` reports `target/<name>` the same way, replacing
+  the `[OK] Standalone ELF: ...` line.
+- **`examples/hexdump/`**: streaming `hexdump -C` clone — 4 KiB chunks on
+  the auto heap, so memory stays flat (1 MiB of input: one live chunk,
+  every previous one reclaimed); output is byte-identical to
+  `hexdump -C` from empty input to 1 MiB, in both memory models.
+- **`examples/flint-brainfuck/`**: Brainfuck interpreter across four
+  `lib/` modules (io / tape / execute / bracket) — the multi-include
+  demo for the new build tree.
+
+### Changed
+
+- **`flint_include_fn` gained a `from_name` parameter**
+  (`include/flint.h`): the name the including file was opened under (the
+  root source's `src_name` at the top level). Breaking for hosts that
+  implement the resolver callback — add the parameter (it may be
+  ignored). `do_include` passes the includer's name; the CLI resolver
+  uses it to relate includes to one another, which is what builds the
+  tree without a second pass over the sources.
+
 ## 0.4.0-pre.3 — 2026-10-25
 
 ### Fixed

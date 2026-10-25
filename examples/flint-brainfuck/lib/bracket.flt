@@ -1,0 +1,66 @@
+// bracket.flt — matching-bracket search for Brainfuck loops.
+//
+// bracket_forward(r1 = prog, r2 = len, r5 = pos of '[') -> r0 = pos of matching ']'
+//   (or -1 if unmatched)
+// bracket_backward(r1 = prog, r5 = pos of ']') -> r0 = pos of matching '['
+//   (or -1 if unmatched)
+
+code:
+
+// Scan forward from '[' counting nesting depth until depth reaches 0.
+bracket_forward:
+    // r1 = prog, r2 = len, r5 = pos of '['
+    set r6, 1               // r6 = nesting depth
+    add r5, r5, 1           // start scanning just after '['
+.af_loop:
+    jump.ge r5, r2, .af_fail    // ran off the end of the program
+    add r7, r1, r5            // r7 = address of prog[r5]
+    load.byte r9, [r7+0]
+    jump.eq r9, 91, .af_open    // '['  -> deeper
+    jump.eq r9, 93, .af_close   // ']'  -> shallower
+    add r5, r5, 1
+    jump .af_loop
+.af_open:
+    add r6, r6, 1
+    add r5, r5, 1
+    jump .af_loop
+.af_close:
+    sub r6, r6, 1
+    jump.eq r6, .af_done        // depth hit 0 -> found the match
+    add r5, r5, 1
+    jump .af_loop
+.af_done:
+    copy r0, r5
+    return
+.af_fail:
+    set r0, -1
+    return
+
+// Scan backward from ']' counting nesting depth until depth reaches 0.
+bracket_backward:
+    // r1 = prog, r5 = pos of ']'
+    set r6, 1               // r6 = nesting depth
+    sub r5, r5, 1           // start scanning just before ']'
+.ab_loop:
+    jump.lt r5, 0, .ab_fail   // ran off the beginning of the program
+    add r7, r1, r5            // r7 = address of prog[r5]
+    load.byte r9, [r7+0]
+    jump.eq r9, 93, .ab_close   // ']'  -> deeper
+    jump.eq r9, 91, .ab_open    // '['  -> shallower
+    sub r5, r5, 1
+    jump .ab_loop
+.ab_close:
+    add r6, r6, 1
+    sub r5, r5, 1
+    jump .ab_loop
+.ab_open:
+    sub r6, r6, 1
+    jump.eq r6, .ab_done        // depth hit 0 -> found the match
+    sub r5, r5, 1
+    jump .ab_loop
+.ab_done:
+    copy r0, r5
+    return
+.ab_fail:
+    set r0, -1
+    return

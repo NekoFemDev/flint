@@ -84,7 +84,7 @@
 extern "C" {
 #endif
 
-#define FLINT_VERSION  "0.4.0-pre.3"
+#define FLINT_VERSION  "0.4.0-pre.4"
 #define FLINT_NREGS    16
 #define FLINT_MAX_SYS  64
 /* pseudo-register used in address-base fields; never a general register */
@@ -350,9 +350,12 @@ char *flint_pp_includes(const char *src, const char *src_name,
  * Return a NUL-terminated source text (malloc'd; the assembler frees it),
  *   "" (also malloc'd)  = this file was already included once — skip it,
  *   NULL + err filled   = hard error (include fails at that source line).
- * from_dir is the directory of the text that contains the include. */
+ * from_dir is the directory of the text that contains the include;
+ * from_name is the name that text was opened under (the including file —
+ * the root source's src_name at the top level). Hosts use it to relate
+ * includes to one another, e.g. to build a dependency tree. */
 typedef char *(*flint_include_fn)(void *ud, const char *name,
-                                  const char *from_dir,
+                                  const char *from_dir, const char *from_name,
                                   char *err, uint32_t errsz);
 
 int  flint_assemble_ctx(const char *src, const char *src_name,

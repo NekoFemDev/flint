@@ -1,0 +1,223 @@
+// hexdump — classic hex + ASCII dump of stdin, hexdump -C style,
+// streaming over the managed (auto) heap.
+//
+// Reads stdin in 4 KiB chunks; each chunk is a fresh `alloc` block that is
+// never freed — in auto mode the collector reclaims the previous chunk once
+// the next one is allocated, so memory stays flat however large the input
+// grows. The same program in manual mode keeps every chunk forever.
+//
+// Output: 8-digit offset, 16 hex bytes (missing ones padded), ASCII column
+// in pipes, and a final total-address line — like `hexdump -C`.
+//
+// Usage:  flint run --memory auto src/main.flt < input
+//         printf 'foobar' | flint run examples/hexdump
+
+data:
+hexd:   str "0123456789abcdef"
+offset: int 0                   // bytes dumped so far (printed as the address)
+line:   bytes 80                // one formatted output line (62 + line_n)
+
+code:
+main:
+.next:
+    call read_chunk             // r0 = bytes (0 = EOF, -1 = error), r1 = block
+    jump.eq r0, 0, .done
+    jump.lt r0, 0, .fail
+    copy r2, r0
+    call dump_chunk             // r1 = block, r2 = n
+    set r1, 0                   // drop the stale block pointer (GC hygiene)
+    jump .next
+.done:
+    call print_total            // final "0000000e" address line
+    set r0, 0
+    exit
+.fail:
+    set r0, 1
+    exit
+
+// read up to 4096 bytes (filling across short reads) into a fresh block
+read_chunk:
+    alloc r1, 4096              // managed input block
+    copy r7, r1                 // keep the base (sys 4 wants buf in r1)
+    set r5, 0                   // total read
+    set r6, 4096                // capacity
+.fill:
+    add r1, r7, r5              // buf = base + total
+    sub r2, r6, r5              // remaining
+    set r0, 0                   // stdin
+    sys 4                       // r0 = bytes read (0 on EOF, -1 on error)
+    jump.lt r0, 0, .err
+    jump.eq r0, 0, .ret
+    add r5, r5, r0
+    jump.lt r5, r6, .fill
+.ret:
+    copy r1, r7                 // block base back into r1
+    set r7, 0                   // don't pin the block in a stale register
+    copy r0, r5
+    return
+.err:
+    set r5, -1
+    jump .ret
+
+// dump_chunk(r1 = block, r2 = n): print n bytes, 16 per line
+dump_chunk:
+    enter 40
+    store [fp-8], r1            // ptr: next byte to dump
+    store [fp-16], r2           // bytes remaining in the block
+.line:
+    load r4, [fp-16]
+    jump.eq r4, 0, .out         // block exhausted?
+    set r5, 16
+    jump.lt r4, r5, .cap
+    copy r4, r5                 // line_n = min(remaining, 16)
+.cap:
+    store [fp-24], r4           // line_n
+    load r5, [fp-8]
+    store [fp-32], r5           // ptr0: line start
+    copy r1, r5
+    copy r2, r4
+    call build_line             // format into the `line` buffer
+    set r1, line
+    load r2, [fp-24]
+    add r2, r2, 63              // fixed prefix 62 + line_n + newline
+    set r0, 1
+    sys 0                       // write the whole line at once
+    // advance: offset += line_n, ptr += line_n, remaining -= line_n
+    set r8, offset
+    load r9, [r8]
+    load r10, [fp-24]
+    add r9, r9, r10
+    store [r8], r9
+    load r5, [fp-32]
+    add r5, r5, r10
+    store [fp-8], r5
+    load r6, [fp-16]
+    sub r6, r6, r10
+    store [fp-16], r6
+    jump .line
+.out:
+    leave
+    return
+
+// build_line(r1 = ptr0, r2 = line_n): fill `line` with one hexdump record
+build_line:
+    enter 16
+    store [fp-8], r1            // ptr0
+    store [fp-16], r2           // line_n
+    // offset: 8 hex digits
+    set r1, offset
+    load r1, [r1]
+    set r2, line
+    call put_hex8               // r0 = line + 8
+    copy r4, r0                 // r4 walks the line buffer
+    // two separator spaces
+    set r7, 32
+    store.byte [r4], r7
+    inc r4
+    store.byte [r4], r7
+    inc r4
+    // hex area: "XX " per byte, extra gutter space after the 8th
+    set r6, 0                   // i
+.hex:
+    load r5, [fp-16]
+    jump.lt r6, r5, .byte
+    set r7, 32                  // past the line's end: three spaces
+    store.byte [r4], r7
+    inc r4
+    store.byte [r4], r7
+    inc r4
+    store.byte [r4], r7
+    inc r4
+    jump .mid
+.byte:
+    load r5, [fp-8]
+    add r5, r5, r6
+    load.byte r7, [r5]          // the byte itself
+    shr r3, r7, 4               // hi nibble
+    set r5, hexd
+    add r5, r5, r3
+    load.byte r3, [r5]
+    store.byte [r4], r3
+    inc r4
+    and r7, r7, 15              // lo nibble
+    set r5, hexd
+    add r5, r5, r7
+    load.byte r3, [r5]
+    store.byte [r4], r3
+    inc r4
+    set r7, 32                  // separator space
+    store.byte [r4], r7
+    inc r4
+.mid:
+    jump.ne r6, 7, .nexti
+    set r7, 32                  // extra gutter space after byte 7
+    store.byte [r4], r7
+    inc r4
+.nexti:
+    inc r6
+    jump.lt r6, 16, .hex
+    set r7, 32                  // one more space, then the pipe
+    store.byte [r4], r7
+    inc r4
+    // ASCII column: |printable chars, '.' for the rest; no padding
+    set r7, 124                 // '|'
+    store.byte [r4], r7
+    inc r4
+    set r6, 0
+.asc:
+    load r5, [fp-16]
+    jump.ge r6, r5, .anext      // past the line's end: nothing to print
+    load r5, [fp-8]
+    add r5, r5, r6
+    load.byte r7, [r5]
+    jump.lt r7, 32, .dot
+    jump.ge r7, 127, .dot
+    jump .ast
+.dot:
+    set r7, 46                  // '.'
+.ast:
+    store.byte [r4], r7
+    inc r4
+.anext:
+    inc r6
+    jump.lt r6, 16, .asc
+    set r7, 124                 // '|'
+    store.byte [r4], r7
+    inc r4
+    set r7, 10                  // '\n'
+    store.byte [r4], r7
+    inc r4
+    leave
+    return
+
+// put_hex8(r1 = value, r2 = dst): write 8 hex digits; r0 = dst + 8
+put_hex8:
+    set r6, 28
+.lp:
+    shr r7, r1, r6
+    and r7, r7, 15
+    set r3, hexd
+    add r3, r3, r7
+    load.byte r7, [r3]
+    store.byte [r2], r7
+    inc r2
+    sub r6, r6, 4
+    jump.ge r6, 0, .lp
+    copy r0, r2
+    return
+
+// print_total: final address line ("0000000e\n"); nothing when input is empty
+print_total:
+    set r1, offset
+    load r1, [r1]
+    jump.eq r1, 0, .ret         // no input -> no output at all
+    set r2, line
+    call put_hex8               // r0 = line + 8
+    set r7, 10
+    store.byte [r0], r7         // '\n'
+    set r0, 1
+    set r1, line
+    set r2, 9
+    sys 0
+.ret:
+    return

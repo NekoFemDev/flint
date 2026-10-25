@@ -1,0 +1,43 @@
+// src/main.flt — flint-brainfuck entry point.
+//
+// A Brainfuck interpreter written in FLINT assembly, split across modules:
+//   lib/io.flt     stdin reading
+//   lib/tape.flt   30000-cell tape
+//   lib/execute.flt command dispatch + loop handling
+//   lib/bracket.flt matching-bracket search
+//
+// Usage:
+//   flint run examples/flint-brainfuck < program.bf
+//   cat program.bf | flint run examples/flint-brainfuck
+//
+// The whole Brainfuck program is read from stdin, then executed with a
+// 30000-cell tape managed by the auto (mark-sweep) allocator.
+
+include "lib/io.flt"
+include "lib/tape.flt"
+include "lib/execute.flt"
+include "lib/bracket.flt"
+
+data:
+// The Brainfuck program read from stdin (64 KiB buffer).
+prog: bytes 65536
+
+code:
+main:
+    // ---- read the Brainfuck program from stdin ----
+    set r1, prog            // r1 = buffer address
+    set r2, 65536           // r2 = max bytes to read
+    call read_stdin         // r0 = bytes read (= program length)
+    copy r2, r0             // r2 = program length (passed to bf_execute)
+
+    // ---- set up the tape (auto-managed, 30000 cells) ----
+    alloc r3, 30000         // r3 = tape base address
+    copy r4, r3             // r4 = current cell address (= base)
+
+    // ---- execute ----
+    set r1, prog            // r1 = program buffer
+    // r2 = length, r3 = tape base, r4 = cell address  (set above)
+    call bf_execute
+
+    set r0, 0               // clean exit code
+    exit

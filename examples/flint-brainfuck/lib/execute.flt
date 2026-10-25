@@ -1,0 +1,100 @@
+// execute.flt — Brainfuck execution loop.
+//
+// Convention on entry to bf_execute:
+//   r1 = program buffer address
+//   r2 = program length (bytes)
+//   r3 = tape base address
+//   r4 = current cell address
+//
+// Scratch: r5..r9.  r3/r4 are preserved across the loop (r4 moves as the
+// pointer moves).  Unknown Brainfuck characters are silently ignored.
+
+code:
+
+bf_execute:
+    set r7, 0               // r7 = program counter (index into buffer)
+.loop:
+    jump.ge r7, r2, .done           // pc past the end -> finished
+
+    // load the current Brainfuck command byte
+    add r8, r1, r7              // r8 = address of prog[pc]
+    load.byte r9, [r8+0]
+
+    // dispatch on the command character
+    jump.eq r9, 62, .do_next    // '>'  move pointer right
+    jump.eq r9, 60, .do_prev    // '<'  move pointer left
+    jump.eq r9, 43, .do_inc     // '+'  increment cell
+    jump.eq r9, 45, .do_dec     // '-'  decrement cell
+    jump.eq r9, 46, .do_out     // '.'  output cell
+    jump.eq r9, 44, .do_in      // ','  input cell
+    jump.eq r9, 91, .do_lstart  // '['  loop start
+    jump.eq r9, 93, .do_lend    // ']'  loop end
+    // anything else: ignore and advance
+    add r7, r7, 1
+    jump .loop
+
+.do_next:
+    call tape_next
+    add r7, r7, 1
+    jump .loop
+.do_prev:
+    call tape_prev
+    add r7, r7, 1
+    jump .loop
+.do_inc:
+    call tape_inc
+    add r7, r7, 1
+    jump .loop
+.do_dec:
+    call tape_dec
+    add r7, r7, 1
+    jump .loop
+.do_out:
+    call tape_cell              // r0 = current cell value
+    sys 1                       // putc(r0)
+    add r7, r7, 1
+    jump .loop
+.do_in:
+    sys 2                       // r0 = getc()  (byte, or -1 at EOF)
+    jump.lt r0, 0, .in_eof      // EOF -> store 0
+    copy r1, r0                 // r1 = byte to store
+    call tape_store
+    add r7, r7, 1
+    jump .loop
+.in_eof:
+    set r1, 0
+    call tape_store
+    add r7, r7, 1
+    jump .loop
+.do_lstart:
+    call tape_cell              // r0 = current cell value
+    jump.eq r0, 0, .ls_skip     // cell == 0 -> skip to matching ']'
+    add r7, r7, 1
+    jump .loop
+.ls_skip:
+    copy r5, r7                 // r5 = position of '['
+    call bracket_forward        // r0 = position of matching ']'
+    jump.lt r0, 0, .ls_fail     // unmatched '['
+    copy r7, r0                 // r7 = position of ']'
+    add r7, r7, 1               // advance past it
+    jump .loop
+.ls_fail:
+    set r0, 251
+    exit
+.do_lend:
+    call tape_cell              // r0 = current cell value
+    jump.eq r0, 0, .ld_done     // cell == 0 -> exit loop
+    copy r5, r7                 // r5 = position of ']'
+    call bracket_backward       // r0 = position of matching '['
+    jump.lt r0, 0, .ld_fail     // unmatched ']'
+    copy r7, r0                 // r7 = position of '['
+    jump .loop                  // re-execute '[' (re-checks the cell)
+.ld_done:
+    add r7, r7, 1
+    jump .loop
+.ld_fail:
+    set r0, 252
+    exit
+
+.done:
+    return

@@ -93,7 +93,7 @@ static char g_seen[8][64]; static int g_nseen;
 static void inc_reset(void) { g_nseen = 0; }
 
 static char *inc_fake(void *ud, const char *name, const char *from_dir,
-                      char *err, uint32_t errsz)
+                      const char *from_name, char *err, uint32_t errsz)
 {
     const inc_entry *e = g_inc;
     size_t nl = strlen(name);
@@ -106,7 +106,7 @@ static char *inc_fake(void *ud, const char *name, const char *from_dir,
     for (int i = 0; i < g_nseen; i++)
         if (strcmp(g_seen[i], name) == 0) { char *z = malloc(1); *z = 0; return z; }
     if (g_nseen < 8) snprintf(g_seen[g_nseen++], 64, "%s", name);
-    (void)ud;
+    (void)ud; (void)from_name;
     size_t n = strlen(e->text) + 1;
     char *d = malloc(n); memcpy(d, e->text, n);
     return d;

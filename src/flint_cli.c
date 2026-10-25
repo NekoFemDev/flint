@@ -196,15 +196,114 @@ static char *read_whole(const char *path, long *out_len)
 /* search order: includer dir, project root, project lib/, cwd variants */
 #define INC_SEEN_MAX 64
 
+/* one node per included file in `flint build`'s status output; children
+ * keep the order the resolver opened them (the DFS order of the source) */
+typedef struct DepNode {
+    char *file;                 /* display path (root- or cwd-relative) */
+    struct DepNode **kids;
+    int nkids, cap;
+} DepNode;
+
 typedef struct {
     char *seen[INC_SEEN_MAX];
     int   n;
     char *root;                 /* project dir or NULL (single file) */
+
+    /* dependency tree: NULL = off — only `flint build` turns it on */
+    DepNode *tree;              /* entry-point node */
+    char *root_real;            /* realpath(root): display-path base */
+    char *cwd_real;             /* realpath("."): display-path base */
+    struct {                    /* one slot per opened file: the name it
+                                   was opened under -> its tree node */
+        char    *name;
+        DepNode *node;
+    } open[INC_SEEN_MAX];
+    int nopen;
 } inc_ctx;
+
+static char *dep_strdup(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *d = (char *)malloc(n);
+    if (d) memcpy(d, s, n);
+    return d;
+}
+
+/* p relative to base at a path boundary, else NULL (base may be NULL) */
+static const char *dep_rel(const char *p, const char *base)
+{
+    size_t n;
+    if (!base) return 0;
+    n = strlen(base);
+    if (n == 0 || strncmp(p, base, n) != 0) return 0;
+    if (n == 1 && base[0] == '/') return p + 1;
+    return (p[n] == '/') ? p + n + 1 : 0;
+}
+
+/* display path for a resolved file: project-root-relative first, then
+ * cwd-relative, then the absolute path */
+static char *dep_display(const inc_ctx *ic, const char *real)
+{
+    const char *t = dep_rel(real, ic->root_real);
+    if (t && *t) return dep_strdup(t);
+    t = dep_rel(real, ic->cwd_real);
+    if (t && *t) return dep_strdup(t);
+    return dep_strdup(real);
+}
+
+/* node owning `file` (freed again on OOM, so callers need no cleanup) */
+static DepNode *dep_new(char *file)
+{
+    DepNode *n;
+    if (!file) return 0;
+    n = (DepNode *)calloc(1, sizeof *n);
+    if (!n) { free(file); return 0; }
+    n->file = file;
+    return n;
+}
+
+static void dep_free(DepNode *n)
+{
+    int i;
+    if (!n) return;
+    for (i = 0; i < n->nkids; i++) dep_free(n->kids[i]);
+    free(n->kids);
+    free(n->file);
+    free(n);
+}
+
+/* parent->kids += n; 0 = ok, -1 = out of memory (n untouched) */
+static int dep_link(DepNode *parent, DepNode *n)
+{
+    if (parent->nkids == parent->cap) {
+        int nc = parent->cap ? parent->cap * 2 : 4;
+        DepNode **nk = (DepNode **)realloc(parent->kids,
+                                           sizeof *nk * (size_t)nc);
+        if (!nk) return -1;
+        parent->kids = nk;
+        parent->cap = nc;
+    }
+    parent->kids[parent->nkids++] = n;
+    return 0;
+}
+
+/* tree node of an include's owner: the file whose frame is live. The
+ * assembler processes a new file depth-first before returning to its
+ * includer, so the most recently opened file carrying `from_name` is
+ * exactly the innermost matching frame. */
+static DepNode *dep_parent(const inc_ctx *ic, const char *from_name)
+{
+    int i;
+    for (i = ic->nopen - 1; i >= 0; i--)
+        if (strcmp(ic->open[i].name, from_name) == 0)
+            return ic->open[i].node;
+    return ic->tree;                    /* unknown owner: root */
+}
 
 static void inc_ctx_init(inc_ctx *ic, const char *root)
 {
     ic->n = 0; ic->root = 0;
+    ic->tree = 0; ic->root_real = 0; ic->cwd_real = 0; ic->nopen = 0;
     if (root) {
         size_t n = strlen(root) + 1;
         ic->root = (char *)malloc(n);
@@ -216,7 +315,57 @@ static void inc_ctx_free(inc_ctx *ic)
 {
     int i;
     for (i = 0; i < ic->n; i++) free(ic->seen[i]);
+    for (i = 0; i < ic->nopen; i++) free(ic->open[i].name);
+    dep_free(ic->tree);
     free(ic->root);
+    free(ic->root_real);
+    free(ic->cwd_real);
+}
+
+/* start dependency tracking (`flint build`); entry = the file about to
+ * be assembled. Without this call the resolver behaves exactly as
+ * before — run/check/dis never record a tree. */
+static void inc_dep_begin(inc_ctx *ic, const char *entry)
+{
+    char *real, *disp, *key;
+
+    ic->root_real = ic->root ? realpath(ic->root, NULL) : 0;
+    ic->cwd_real  = realpath(".", NULL);
+
+    real = realpath(entry, NULL);
+    disp = real ? dep_display(ic, real) : dep_strdup(entry);
+    free(real);
+    ic->tree = dep_new(disp);
+    if (!ic->tree) return;
+
+    key = dep_strdup(entry);
+    if (key) {                          /* the entry's own include site */
+        ic->open[0].name = key;
+        ic->open[0].node = ic->tree;
+        ic->nopen = 1;
+    }
+}
+
+/* record one opened include: an edge from the includer to `real` */
+static void inc_dep_note(inc_ctx *ic, const char *name, const char *from_name,
+                         const char *real)
+{
+    DepNode *parent, *n;
+    char *key;
+
+    if (!ic->tree) return;
+    parent = dep_parent(ic, from_name);
+    n = dep_new(dep_display(ic, real));
+    if (!n) return;
+    if (!parent || dep_link(parent, n) != 0) { dep_free(n); return; }
+    if (ic->nopen < INC_SEEN_MAX) {
+        key = dep_strdup(name);
+        if (key) {
+            ic->open[ic->nopen].name = key;
+            ic->open[ic->nopen].node = n;
+            ic->nopen++;
+        }
+    }
 }
 
 static int inc_seen(inc_ctx *ic, const char *real)
@@ -234,7 +383,7 @@ static int inc_seen(inc_ctx *ic, const char *real)
 }
 
 static char *inc_load(void *ud, const char *name, const char *from_dir,
-                      char *err, uint32_t errsz)
+                      const char *from_name, char *err, uint32_t errsz)
 {
     inc_ctx *ic = (inc_ctx *)ud;
     char cand[1024];
@@ -273,8 +422,12 @@ static char *inc_load(void *ud, const char *name, const char *from_dir,
         }
         long len;
         char *text = read_whole(real, &len);
+        if (!text) {                              /* unreadable: next dir */
+            free(real);
+            continue;
+        }
+        inc_dep_note(ic, name, from_name, real);  /* tree edge for `build` */
         free(real);
-        if (!text) continue;                      /* unreadable: next dir */
         return text;
     }
     snprintf(err, errsz, "include \"%.200s\": file not found", name);
@@ -940,6 +1093,45 @@ static int build_elf(const char *out, const flint_prog *p, flint_mem_mode mem,
     return 0;
 }
 
+/* ---- cargo-style status output ---- */
+
+#define CLR_RESET     "\033[0m"
+#define CLR_BOLD_CYAN "\033[1;36m"
+#define CLR_GREEN     "\033[32m"
+
+/* colors only when stdout is a terminal; NO_COLOR opts out */
+static int use_color(void)
+{
+    return isatty(STDOUT_FILENO) && getenv("NO_COLOR") == 0;
+}
+
+/* include tree, one file per line: `prefix` is the indentation at this
+ * level, `is_last` picks └── over ├──. A negative `is_last` marks the
+ * entry point, printed without a connector of its own. */
+static void print_dependency_tree(const DepNode *node, const char *prefix,
+                                  int is_last)
+{
+    int i;
+
+    if (!node) return;
+    if (is_last < 0) {                          /* entry point */
+        printf("%s%s\n", prefix, node->file);
+        for (i = 0; i < node->nkids; i++)
+            print_dependency_tree(node->kids[i], prefix,
+                                  i == node->nkids - 1);
+        return;
+    }
+    printf("%s%s %s\n", prefix, is_last ? "└──" : "├──", node->file);
+    if (node->nkids > 0) {
+        char sub[512];
+        snprintf(sub, sizeof sub, "%s%s", prefix,
+                 is_last ? "    " : "│   ");
+        for (i = 0; i < node->nkids; i++)
+            print_dependency_tree(node->kids[i], sub,
+                                  i == node->nkids - 1);
+    }
+}
+
 /* assemble <file.flt|dir> into one self-contained .fbc image; includes
  * are resolved here, so the image needs no sources at run time. With
  * elf != 0 the output is build/stub.elf fused with the program instead:
@@ -952,11 +1144,16 @@ int flint_cli_cmd_build(const char *arg, const char *outarg, int elf)
     uint32_t stack = 65536;
     flint_mem_mode mem = FLINT_MEM_MANUAL;
     struct stat st;
+    struct timespec t0, t1;
+    int color;
 
     if (arg != 0 && has_fbc_ext(arg)) {
         fprintf(stderr, "flint build: %s is already a bytecode image\n", arg);
         return 2;
     }
+
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    color = use_color();
 
     if (from_file) {
         if (snprintf(src_path, sizeof src_path, "%s", arg) >=
@@ -994,11 +1191,17 @@ int flint_cli_cmd_build(const char *arg, const char *outarg, int elf)
 
     flint_prog p; char err[384] = "";
     inc_ctx ic; inc_ctx_init(&ic, from_file ? 0 : root);
+    inc_dep_begin(&ic, src_path);        /* record the include tree */
+
+    printf("%s   Compiling %s [%s]%s\n", color ? CLR_BOLD_CYAN : "",
+           name, flint_mem_mode_name(mem), color ? CLR_RESET : "");
+    fflush(stdout);                      /* keep status ahead of any error */
+
     int rc = flint_assemble_ctx(src, src_path, inc_load, &ic, &p, stack,
                                 err, sizeof(err));
     free(src);
-    inc_ctx_free(&ic);
     if (rc != 0) {
+        inc_ctx_free(&ic);
         fprintf(stderr, "flint: %s\n", err);
         return 1;
     }
@@ -1007,9 +1210,15 @@ int flint_cli_cmd_build(const char *arg, const char *outarg, int elf)
      * checked before target/ is created so a failed build leaves nothing */
     if (elf && stat(FLINT_STUB_PATH, &st) != 0) {
         fprintf(stderr, "flint build: %s missing, run make\n", FLINT_STUB_PATH);
+        inc_ctx_free(&ic);
         flint_prog_free(&p);
         return 2;
     }
+
+    /* preprocessing succeeded: show what actually went into the image */
+    print_dependency_tree(ic.tree, "   ", -1);
+    inc_ctx_free(&ic);
+    fflush(stdout);
 
     if (outarg != 0) {
         if (snprintf(out, sizeof out, "%s", outarg) >= (int)sizeof out) {
@@ -1051,19 +1260,26 @@ int flint_cli_cmd_build(const char *arg, const char *outarg, int elf)
             flint_prog_free(&p);
             return 2;
         }
-        printf("[OK] Standalone ELF: %s\n", out);
-        flint_prog_free(&p);
-        return 0;
-    }
-
-    if (flint_img_save(out, &p, mem, err, sizeof err) != 0) {
+    } else if (flint_img_save(out, &p, mem, err, sizeof err) != 0) {
         fprintf(stderr, "flint: %s\n", err);
         flint_prog_free(&p);
         return 2;
     }
-    printf("flint: built %s (%u code bytes, %u mem bytes, memory = %s)\n",
-           out, p.code_size, p.mem_size, flint_mem_mode_name(mem));
     flint_prog_free(&p);
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long ms = (long)(t1.tv_sec - t0.tv_sec) * 1000L +
+              (long)(t1.tv_nsec - t0.tv_nsec) / 1000000L;
+    if (ms < 0) ms = 0;
+
+    if (stat(out, &st) == 0) {
+        printf("%s    Finished %s (%.1f KiB) in %ldms%s\n",
+               color ? CLR_GREEN : "", out,
+               (double)st.st_size / 1024.0, ms, color ? CLR_RESET : "");
+    } else {
+        printf("%s    Finished %s in %ldms%s\n", color ? CLR_GREEN : "",
+               out, ms, color ? CLR_RESET : "");
+    }
     return 0;
 }
 

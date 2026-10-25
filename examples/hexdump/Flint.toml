@@ -1,0 +1,5 @@
+[project]
+name = "hexdump"
+entry = "src/main.flt"
+stack = 65536
+memory = "auto"

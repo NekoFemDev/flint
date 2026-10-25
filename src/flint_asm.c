@@ -1005,6 +1005,7 @@ static void do_include(asmx *a)
 
     ierr[0] = 0;
     char *text = a->inc_fn(a->inc_ud, path, a->cur_dir ? a->cur_dir : ".",
+                           a->cur_name ? a->cur_name : "<src>",
                            ierr, (uint32_t)sizeof(ierr));
     if (!text) {
         fail(a, "include \"%s\": %s", path, ierr[0] ? ierr : "not found");

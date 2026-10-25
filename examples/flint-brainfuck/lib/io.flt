@@ -1,0 +1,25 @@
+// io.flt — stdin/stdout primitives for the Brainfuck interpreter.
+//
+// Host syscalls used:
+//   sys 1 = putc  (r0 = one byte -> stdout)
+//   sys 2 = getc  (r0 = one byte, or -1 at EOF)
+//
+// read_stdin(r1 = buf, r2 = max) -> r0 = bytes read
+//   Reads bytes from stdin until EOF or the buffer is full.
+
+code:
+
+read_stdin:
+    copy r4, r1             // r4 = write pointer (walks the buffer)
+    set r5, 0               // r5 = bytes read so far
+.rd_loop:
+    jump.eq r5, r2, .rd_done    // buffer full -> stop
+    sys 2                       // r0 = getc()  (byte, or -1 at EOF)
+    jump.lt r0, 0, .rd_done     // EOF -> stop
+    store.byte [r4+0], r0       // store the byte
+    add r4, r4, 1
+    add r5, r5, 1
+    jump .rd_loop
+.rd_done:
+    copy r0, r5
+    return
