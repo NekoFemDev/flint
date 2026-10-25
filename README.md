@@ -1,4 +1,4 @@
-# FLINT 0.4.0-pre.4
+# FLINT 0.4.0-pre.5
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.
@@ -304,6 +304,37 @@ including file's directory and name, which is how the CLI builds the
 dependency tree above — while `flint_pp_includes()` is a
 standalone textual preprocessor (fopen, depth-capped at 10) for hosts
 without a resolver.
+
+### Macros
+
+`%macro name argc` … `%endmacro` defines a text macro; the body is
+captured at the definition and replayed at every invocation. `%1` … `%N`
+stand for the invocation arguments — `argc` is how many there are
+(0 for none):
+
+```
+%macro SAVE_REGS 0
+    push r1
+    push r2
+%endmacro
+
+%macro LOADV 2                  // LOADV rd, base  =>  load rd, [base]
+    load %1, [%2]
+%endmacro
+
+main:
+    SAVE_REGS
+    LOADV r0, r1
+```
+
+Invoke a macro like a mnemonic: its arguments follow the name on the same
+line, comma-separated, and a bracketed operand stays together — in
+`LOADV r0, [r1+8]` the second argument is `[r1+8]`. A macro may be defined
+in any section, works from included files and nests (expansion depth
+capped at 64), and shadows a same-named mnemonic. The assembler rejects a
+duplicate macro, an unterminated `%macro`, an orphan `%endmacro`, a wrong
+argument count and an out-of-range `%N` (checked against `argc` at
+definition time); an error inside a body reports the invocation line.
 
 ### Bundled libraries
 

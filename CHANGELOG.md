@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0-pre.5 — 2026-10-25
+
+### Added
+
+- **NASM-style text macros** (`src/flint_asm.c`): `%macro name argc` …
+  `%endmacro` captures a body and replays it at each invocation;
+  `%1`…`%N` substitute the comma-separated arguments (`[...]` operands
+  stay glued, so `LOADV r0, [r1+8]` passes one argument). Bodies expand
+  as token streams into the scanner ahead of the enclosing source: macros
+  nest (depth cap 64), work in `code:`/`data:`, work from included files,
+  and shadow a same-named mnemonic. Duplicate macros, an unterminated
+  `%macro`, an orphan `%endmacro`, a wrong argument count and an
+  out-of-range `%N` (checked at definition time) are rejected with a
+  line; an error inside a body reports the invocation line.
+  `README.md` documents the layer under Language syntax.
+
 ## 0.4.0-pre.4 — 2026-10-25
 
 ### Added
