@@ -4,10 +4,12 @@
  * with their own syscall table and skip the CLI layer entirely.
  */
 
-/* realpath() is POSIX, and glibc hides its declaration under -std=c99
- * unless a feature-test macro asks for it; GCC 14+ then turns the
- * missing declaration into a hard error. */
-#define _POSIX_C_SOURCE 200809L
+/* realpath() is POSIX, but glibc guards its declaration by feature-test
+ * macros: through 2.41 it was __USE_XOPEN2K8 (POSIX 2008), since 2.42 it
+ * is __USE_MISC or __USE_XOPEN_EXTENDED. _XOPEN_SOURCE 700 satisfies both
+ * (and still implies POSIX.1-2008); without a macro GCC 14+ turns the
+ * implicit declaration into a hard error. */
+#define _XOPEN_SOURCE 700
 
 #include <stdio.h>
 #include <stdlib.h>
