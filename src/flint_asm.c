@@ -22,6 +22,8 @@
  *   sections   code: / data:  (code is the default)
  *   labels     name:  |  .local:   (locals attach to last global)
  *   includes   include "file"  |  .include "file"   (same directive)
+ *   macros     %macro name argc ... %endmacro; invoke as `name a1, a2`
+ *              (%1..%N in the body substitute the invocation arguments)
  *   comments   // to end of line
  *
  * ABI (documented in flint.h): r0..r3 args/result, r4..r11 caller-saved,
@@ -103,7 +105,7 @@ typedef struct { char name[T_MAX]; flint_word addr; int kind; } symbol;
 
 /* ---- lexer ---- */
 
-enum { T_IDENT, T_NUM, T_STR, T_CHR, T_PUNCT, T_EOL, T_EOF };
+enum { T_IDENT, T_NUM, T_STR, T_CHR, T_PUNCT, T_EOL, T_EOF, T_MARG };
 
 typedef struct {
     int type;
@@ -120,6 +122,33 @@ typedef struct {
     int      buf;               /* 0 = code image, 1 = data image */
     uint32_t line;
 } fixup;
+
+/* ---- NASM-style text macros (%macro / %endmacro) ----
+ *
+ * A definition captures its body as a token list; %1..%N stay as T_MARG
+ * references and are substituted at expansion. Expansion pushes the
+ * substituted list as a lexer frame that is served ahead of the
+ * enclosing source, so macros nest and compose with include frames. */
+
+#define FLINX_MAX_MARGS        16
+#define FLINX_MAX_MACRO_DEPTH  64
+
+typedef struct {
+    char     name[T_MAX];
+    int      argc;
+    token   *body;              /* captured body tokens, EOLs included */
+    uint32_t nbody;
+} macrodef;
+
+typedef struct {
+    token   *toks;              /* substituted body, owned by the frame */
+    uint32_t n, pos;
+    int      saved_have;        /* lookahead deferred past the body:    */
+    token    saved_tok;         /* the token that followed the invocation */
+    uint32_t saved_line;        /* line to resume at once the body ends */
+} macroframe;
+
+typedef struct { token *t; uint32_t n, cap; } tokbuf;
 
 /* include machinery: a stack of saved parent lexer states */
 #define FLINX_MAX_INC 24
@@ -149,6 +178,10 @@ typedef struct {
     char     last_global[T_MAX];
     int      section;
     char     err[384];
+
+    /* macros: definitions + active expansion frames */
+    macrodef *macs; uint32_t nmac, cmac;
+    macroframe mf[FLINX_MAX_MACRO_DEPTH]; int msp;
 
     /* lookahead — struct fields, must survive frame swaps */
     token ahead_v; int have_v;
@@ -197,6 +230,21 @@ static int esc(int c)
 
 static void next_tok(asmx *a, token *t)
 {
+    /* active macro expansions run ahead of the enclosing source */
+    while (a->msp > 0) {
+        macroframe *f = &a->mf[a->msp - 1];
+        if (f->pos < f->n) { *t = f->toks[f->pos++]; return; }
+        a->line = f->saved_line;
+        if (f->saved_have) {                 /* deferred lookahead is next */
+            *t = f->saved_tok;
+            free(f->toks);
+            a->msp--;
+            return;
+        }
+        free(f->toks);
+        a->msp--;
+    }
+
     t->s[0] = 0; t->num = 0; t->len = 0;
     t->type = T_EOL;
 
@@ -210,6 +258,28 @@ static void next_tok(asmx *a, token *t)
             a->src[a->ipos] == '\r') { a->ipos++; continue; }
         if (a->src[a->ipos] == '\n') { a->line++; a->ipos++; t->type = T_EOL; return; }
         break;
+    }
+
+    /* '%': a %macro/%endmacro-style directive word, or %1..%N argument ref */
+    if (a->src[a->ipos] == '%') {
+        a->ipos++;
+        if (is_dig(a->src[a->ipos])) {
+            uint64_t v = 0;
+            while (is_dig(a->src[a->ipos])) {
+                v = v * 10 + (uint64_t)(a->src[a->ipos] - '0');
+                a->ipos++;
+            }
+            t->num = (flint_word)v; t->type = T_MARG; return;
+        }
+        if (is_idstart(a->src[a->ipos])) {
+            int n = 0;
+            t->s[n++] = '%';
+            while (is_id(a->src[a->ipos]) && n < T_MAX - 1)
+                t->s[n++] = a->src[a->ipos++];
+            t->s[n] = 0; t->type = T_IDENT; return;
+        }
+        fail(a, "stray '%%'");
+        t->type = T_EOF; return;
     }
 
     if (is_idstart(a->src[a->ipos])) {
@@ -296,6 +366,218 @@ static void nx(asmx *a, token *t)
 {
     if (a->have_v) { *t = a->ahead_v; a->have_v = 0; }
     else next_tok(a, t);
+}
+
+/* ---- NASM-style text macros ---- */
+
+static int tb_put(tokbuf *b, const token *t)
+{
+    if (b->n + 1 > b->cap) {
+        uint32_t nc = b->cap ? b->cap * 2 : 32;
+        token *nt = (token *)realloc(b->t, nc * sizeof(token));
+        if (!nt) return 0;
+        b->t = nt; b->cap = nc;
+    }
+    b->t[b->n++] = *t;
+    return 1;
+}
+
+static int macro_find(asmx *a, const char *name)
+{
+    uint32_t i;
+    for (i = 0; i < a->nmac; i++)
+        if (strcmp(a->macs[i].name, name) == 0) return (int)i;
+    return -1;
+}
+
+static int macro_add(asmx *a, const char *name, int argc, token *body, uint32_t nbody)
+{
+    if (a->nmac + 1 > a->cmac) {
+        uint32_t nc = a->cmac ? a->cmac * 2 : 16;
+        macrodef *nm = (macrodef *)realloc(a->macs, nc * sizeof(macrodef));
+        if (!nm) { fail(a, "out of memory"); return 0; }
+        a->macs = nm; a->cmac = nc;
+    }
+    memset(&a->macs[a->nmac], 0, sizeof(macrodef));
+    snprintf(a->macs[a->nmac].name, T_MAX, "%s", name);
+    a->macs[a->nmac].argc  = argc;
+    a->macs[a->nmac].body  = body;
+    a->macs[a->nmac].nbody = nbody;
+    a->nmac++;
+    return 1;
+}
+
+/* %macro NAME argc ... %endmacro — capture the body token list */
+static int do_macro_def(asmx *a)
+{
+    token t;
+    char name[T_MAX];
+    int argc;
+    tokbuf body = {0};
+
+    pk(a, &t);
+    if (t.type != T_IDENT || t.s[0] == '%') {
+        fail(a, "expected macro name after %%macro");
+        return 0;
+    }
+    snprintf(name, sizeof(name), "%s", t.s);
+    nx(a, &t);
+
+    pk(a, &t);
+    if (t.type != T_NUM) {
+        fail(a, "expected argument count after %%macro %s", name);
+        return 0;
+    }
+    nx(a, &t);
+    if (t.num < 0 || t.num > FLINX_MAX_MARGS) {
+        fail(a, "macro \"%s\": argument count out of range (0..%d)",
+             name, FLINX_MAX_MARGS);
+        return 0;
+    }
+    argc = (int)t.num;
+
+    pk(a, &t);
+    if (t.type == T_EOL) nx(a, &t);
+    else if (t.type != T_EOF) {
+        fail(a, "unexpected text after %%macro %s %d", name, argc);
+        return 0;
+    }
+
+    for (;;) {
+        pk(a, &t);
+        if (t.type == T_EOF) {
+            fail(a, "unterminated %%macro \"%s\" (missing %%endmacro)", name);
+            free(body.t);
+            return 0;
+        }
+        nx(a, &t);
+        if (t.type == T_IDENT && strcmp(t.s, "%endmacro") == 0) break;
+        if (t.type == T_MARG && (t.num < 1 || t.num > (flint_word)argc)) {
+            fail(a, "macro \"%s\": %%%lld out of range (argc=%d)",
+                 name, (long long)t.num, argc);
+            free(body.t);
+            return 0;
+        }
+        if (!tb_put(&body, &t)) {
+            fail(a, "out of memory");
+            free(body.t);
+            return 0;
+        }
+    }
+
+    pk(a, &t);
+    if (t.type == T_EOL) nx(a, &t);
+    else if (t.type != T_EOF) {
+        fail(a, "unexpected text after %%endmacro");
+        free(body.t);
+        return 0;
+    }
+
+    if (macro_find(a, name) >= 0) {
+        fail(a, "duplicate macro \"%s\"", name);
+        free(body.t);
+        return 0;
+    }
+    if (!macro_add(a, name, argc, body.t, body.n)) {
+        free(body.t);
+        return 0;
+    }
+    return 1;
+}
+
+/* name a1, a2 — substitute %1..%N into the body and queue it as a frame.
+ * inv_line is the invocation line: body diagnostics report it. */
+static int macro_expand(asmx *a, int mi, token *t, uint32_t inv_line)
+{
+    macrodef *m = &a->macs[mi];
+    tokbuf args[FLINX_MAX_MARGS];
+    tokbuf cur = {0}, exp = {0};
+    int nargs = 0, depth = 0, ok = 0;
+    uint32_t i, j;
+    uint32_t after_line;
+
+    memset(args, 0, sizeof(args));
+
+    /* arguments: comma-separated token lists, '[' ... ']' stays glued */
+    for (;;) {
+        pk(a, t);
+        if (t->type == T_EOL || t->type == T_EOF) break;
+        nx(a, t);
+        if (t->type == T_PUNCT && t->s[0] == '[') depth++;
+        else if (t->type == T_PUNCT && t->s[0] == ']') { if (depth > 0) depth--; }
+        if (depth == 0 && t->type == T_PUNCT && t->s[0] == ',') {
+            if (nargs >= FLINX_MAX_MARGS) {
+                fail(a, "macro \"%s\": too many arguments (max %d)",
+                     m->name, FLINX_MAX_MARGS);
+                goto done;
+            }
+            args[nargs++] = cur;
+            memset(&cur, 0, sizeof(cur));
+            continue;
+        }
+        if (!tb_put(&cur, t)) { fail(a, "out of memory"); goto done; }
+    }
+    if (cur.n > 0 || nargs > 0) {
+        if (nargs >= FLINX_MAX_MARGS) {
+            fail(a, "macro \"%s\": too many arguments (max %d)",
+                 m->name, FLINX_MAX_MARGS);
+            goto done;
+        }
+        args[nargs++] = cur;
+        memset(&cur, 0, sizeof(cur));
+    }
+
+    /* errors inside the body are reported at the invocation line */
+    after_line = a->line;
+    a->line = inv_line;
+
+    if (nargs != m->argc) {
+        fail(a, "macro \"%s\" expects %d argument%s, got %d",
+             m->name, m->argc, m->argc == 1 ? "" : "s", nargs);
+        goto done;
+    }
+
+    for (i = 0; i < m->nbody; i++) {
+        if (m->body[i].type == T_MARG) {
+            int k = (int)m->body[i].num;
+            if (k < 1 || k > nargs) {
+                fail(a, "macro \"%s\": bad argument reference", m->name);
+                goto done;
+            }
+            for (j = 0; j < args[k - 1].n; j++)
+                if (!tb_put(&exp, &args[k - 1].t[j])) {
+                    fail(a, "out of memory");
+                    goto done;
+                }
+        } else if (!tb_put(&exp, &m->body[i])) {
+            fail(a, "out of memory");
+            goto done;
+        }
+    }
+
+    pk(a, t);
+    if (t->type == T_EOL) nx(a, t);          /* the invocation line ends */
+
+    if (a->msp >= FLINX_MAX_MACRO_DEPTH) {
+        fail(a, "macro expansion too deep (recursive \"%s\"?)", m->name);
+        goto done;
+    }
+    {
+        macroframe *f = &a->mf[a->msp++];
+        f->toks = exp.t; f->n = exp.n; f->pos = 0;
+        f->saved_have = a->have_v;
+        f->saved_tok  = a->ahead_v;
+        f->saved_line = after_line;
+        a->have_v = 0;
+        exp.t = 0; exp.n = 0; exp.cap = 0;   /* the frame owns the list */
+    }
+    ok = 1;
+
+done:
+    for (i = 0; i < (uint32_t)nargs; i++) free(args[i].t);
+    free(cur.t);
+    if (!ok) free(exp.t);
+    return ok;
 }
 
 /* ---- symbols / fixups ---- */
@@ -411,6 +693,10 @@ static int parse_reg(asmx *a, int *r, token *t)
 {
     int n;
     pk(a, t);
+    if (t->type == T_MARG) {
+        fail(a, "macro argument reference outside a macro body");
+        return 0;
+    }
     n = reg_no(t);
     if (n < 0) { fail(a, "expected register r0..r15"); return 0; }
     nx(a, t);
@@ -421,6 +707,10 @@ static int parse_reg(asmx *a, int *r, token *t)
 static int parse_imm(asmx *a, opr *o, token *t)
 {
     pk(a, t);
+    if (t->type == T_MARG) {
+        fail(a, "macro argument reference outside a macro body");
+        return 0;
+    }
     if (t->type == T_PUNCT && t->s[0] == '-') {
         nx(a, t);
         pk(a, t);
@@ -1103,6 +1393,7 @@ static int asm_statement(asmx *a, const mnem_t *m, const char *nm)
 static int asm_scan(asmx *a)
 {
     token t, t2;
+    uint32_t tline;
 
     for (;;) {
         pk(a, &t);
@@ -1116,11 +1407,16 @@ static int asm_scan(asmx *a)
 
         if (t.type == T_EOL) { nx(a, &t); continue; }
 
+        if (t.type == T_MARG) {
+            fail(a, "macro argument reference outside a macro body");
+            break;
+        }
         if (t.type != T_IDENT) {
             fail(a, "expected mnemonic, label or section");
             break;
         }
         nx(a, &t);                          /* ident consumed */
+        tline = a->line;                    /* its line: lookahead may lex on */
 
         pk(a, &t2);
         if (t2.type == T_PUNCT && t2.s[0] == ':') {
@@ -1133,6 +1429,23 @@ static int asm_scan(asmx *a)
 
         if (strcmp(t.s, "include") == 0 || strcmp(t.s, ".include") == 0) {
             do_include(a); continue;
+        }
+
+        if (strcmp(t.s, "%macro") == 0) {
+            if (!do_macro_def(a)) break;
+            continue;
+        }
+        if (strcmp(t.s, "%endmacro") == 0) {
+            fail(a, "%%endmacro without matching %%macro");
+            break;
+        }
+
+        {
+            int mi = macro_find(a, t.s);
+            if (mi >= 0) {                     /* macro shadows a mnemonic */
+                if (!macro_expand(a, mi, &t, tline)) break;
+                continue;
+            }
         }
 
         {
@@ -1387,6 +1700,10 @@ char *flint_pp_includes(const char *src, const char *src_name,
 
 static void flint_prog_free_tmp(asmx *a)
 {
+    uint32_t i;
+    for (i = 0; i < a->nmac; i++) free(a->macs[i].body);
+    free(a->macs);
+    while (a->msp > 0) free(a->mf[--a->msp].toks);
     free(a->code.b); free(a->mem.b);
     free(a->syms); free(a->fix);
 }

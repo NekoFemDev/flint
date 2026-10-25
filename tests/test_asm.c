@@ -83,6 +83,7 @@ static const inc_entry g_inc[] = {
     { "data.flt",  "data:\ninc_msg: str \"hi\", 0\ncode:\n" },
     { "n1.flt",     "include \"n2.flt\"\ncode:\ninc_who:\n    copy r4, r5\n    return\n" },
     { "n2.flt",     "code:\ninc_nested_helper:\n    set r1, 7\n    return\n" },
+    { "macros.flt", "%macro DOUBLE 1\n    add %1, %1, %1\n%endmacro\n" },
     { "cyc_a.flt",  "include \"cyc_b.flt\"\ncode:\ninc_a:\n    return\n" },
     { "cyc_b.flt",  "include \"cyc_a.flt\"\ncode:\ninc_b:\n    return\n" },
     { 0, 0 }
@@ -381,6 +382,109 @@ static const char *S_r15 =
 "    sys 0\n"
 "    exit\n";
 
+/* v0.4.0: NASM-style text macros (%macro / %endmacro, %1..%N) */
+
+static const char *S_macro0 =
+"code:\n"
+"%macro SAVE_REGS 0\n"
+"    push r1\n"
+"    push r2\n"
+"%endmacro\n"
+"%macro RESTORE_REGS 0\n"
+"    pop r2\n"
+"    pop r1\n"
+"%endmacro\n"
+"main:\n"
+"    set r1, 30\n"
+"    set r2, 12\n"
+"    SAVE_REGS\n"
+"    set r1, 0\n"
+"    set r2, 0\n"
+"    RESTORE_REGS\n"
+"    add r0, r1, r2\n"
+"    sys 0\n"
+"    exit\n";
+
+static const char *S_macro_args =
+"code:\n"
+"%macro LOADV 2\n"
+"    load %1, [%2]\n"
+"%endmacro\n"
+"data:\n"
+"v: int 42\n"
+"code:\n"
+"main:\n"
+"    set r1, v\n"
+"    LOADV r0, r1\n"
+"    sys 0\n"
+"    exit\n";
+
+static const char *S_macro_nest =
+"code:\n"
+"%macro PUSH2 0\n"
+"    push r1\n"
+"    push r2\n"
+"%endmacro\n"
+"%macro SAVE2 0\n"
+"    PUSH2\n"
+"%endmacro\n"
+"main:\n"
+"    set r1, 40\n"
+"    set r2, 2\n"
+"    SAVE2\n"
+"    set r1, 0\n"
+"    set r2, 0\n"
+"    pop r2\n"
+"    pop r1\n"
+"    add r0, r1, r2\n"
+"    sys 0\n"
+"    exit\n";
+
+static const char *S_bad_endmacro =
+"code:\n"
+"main:\n"
+"    %endmacro\n"
+"    exit\n";
+
+static const char *S_bad_macro_open =
+"code:\n"
+"%macro FOO 0\n"
+"    push r1\n"
+"main:\n"
+"    exit\n";
+
+static const char *S_bad_macro_ref =
+"code:\n"
+"%macro TWO 2\n"
+"    add %1, %2, %3\n"
+"%endmacro\n"
+"main:\n"
+"    exit\n";
+
+static const char *S_bad_macro_count =
+"code:\n"
+"%macro ONE 1\n"
+"    push %1\n"
+"%endmacro\n"
+"main:\n"
+"    ONE\n"
+"    exit\n";
+
+static const char *S_bad_marg =
+"code:\n"
+"main:\n"
+"    push %1\n"
+"    exit\n";
+
+static const char *S_bad_macro_body =
+"code:\n"
+"%macro BAD 0\n"
+"    frobnicate r1\n"
+"%endmacro\n"
+"main:\n"
+"    BAD\n"
+"    exit\n";
+
 /* --- bench --- */
 
 static void t_hello(void)
@@ -462,6 +566,12 @@ int main(void)
     if (run_p(S_index_store, "index_store"))
         chk_out("77", "storx + auto-indexed load");
     if (run_p(S_r15,    "r15"))     chk_out("909",  "r15 usable");
+    if (run_p(S_macro0, "macro0"))
+        chk_out("42", "macro: zero-arg SAVE_REGS/RESTORE_REGS");
+    if (run_p(S_macro_args, "macroargs"))
+        chk_out("42", "macro: %1/%2 substitution with bracketed arg");
+    if (run_p(S_macro_nest, "macronest"))
+        chk_out("42", "macro: nested expansion");
     if (run_p(S_unsig,  "unsig")) {
         chk_out("42", "unsigned pair lo/hs");
         /* lo must not fire: the "99" marker must never reach stdout */
@@ -514,6 +624,15 @@ int main(void)
                       g_rc, (int)(outn > 40 ? 40 : outn), out); fails++; }
     }
     inc_reset();
+    if (run_ctx("include \"macros.flt\"\n"
+                "code:\n"
+                "main:\n"
+                "    set r0, 21\n"
+                "    DOUBLE r0\n"
+                "    sys 0\n"
+                "    exit\n", "main.flt", inc_fake, 0, "inc-macro"))
+        chk_out("42", "include: macro defined in an included file");
+    inc_reset();
     if (run_ctx("include \"cyc_a.flt\"\ncode:\nmain:\n    call inc_a\n"
                 "    call inc_b\n    set r0, 0\n    exit\n", "main.flt",
                 inc_fake, 0, "inc-cycle") &&
@@ -554,6 +673,20 @@ int main(void)
     chk_reject(S_bad_dirc,  "data directive in code rejected");
     chk_reject(S_bad_reg,   "register r16 rejected");
     chk_reject(S_bad_setreg, "set reg, reg rejected (use copy)");
+    chk_reject(S_bad_endmacro,  "%endmacro without %macro rejected");
+    chk_reject(S_bad_macro_open, "unterminated %macro rejected");
+    chk_reject(S_bad_macro_ref,  "%N out of range rejected");
+    chk_reject(S_bad_macro_count, "wrong macro argument count rejected");
+    chk_reject(S_bad_marg,  "%1 outside a macro rejected");
+    {
+        flint_prog p; char err[256] = "";
+        if (flint_assemble(S_bad_macro_body, &p, 4096, err, sizeof(err)) == 0) {
+            printf("FAIL  macro-body error: accepted, expected error\n"); fails++;
+            flint_prog_free(&p);
+        } else if (strstr(err, ":6:"))
+            printf("PASS  macro-body error points at the invocation  (%s)\n", err);
+        else { printf("FAIL  macro-body error: wrong line [%s]\n", err); fails++; }
+    }
 
     printf("fails: %d\n", fails);
     return fails ? 1 : 0;
