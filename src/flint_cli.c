@@ -235,7 +235,7 @@ static char *inc_load(void *ud, const char *name, const char *from_dir,
                       char *err, uint32_t errsz)
 {
     inc_ctx *ic = (inc_ctx *)ud;
-    char cand[1024], real[1024];
+    char cand[1024];
     char *dirs[8];              /* search dirs */
     int nd = 0;
 
@@ -257,14 +257,21 @@ static char *inc_load(void *ud, const char *name, const char *from_dir,
         } else {
             snprintf(cand, sizeof cand, "%.480s/%.480s", dirs[i], name);
         }
-        if (!realpath(cand, real)) continue;
+        /* realpath(path, NULL) mallocs the result. Passing a caller
+         * buffer instead requires PATH_MAX + 1 bytes — glibc's fortify
+         * wrapper (__realpath_chk, _FORTIFY_SOURCE builds) aborts the
+         * process for anything smaller. */
+        char *real = realpath(cand, NULL);
+        if (!real) continue;
         if (inc_seen(ic, real)) {                 /* already included once */
             char *z = (char *)malloc(1);
             if (z) *z = 0;
+            free(real);
             return z;
         }
         long len;
         char *text = read_whole(real, &len);
+        free(real);
         if (!text) continue;                      /* unreadable: next dir */
         return text;
     }
@@ -470,7 +477,7 @@ static int proj_load(const char *root, flint_proj *pr, char *err, size_t ecap)
     long len;
     char *src = read_whole(path, &len);
     if (!src) {
-        snprintf(err, ecap, "cannot read %s (not a project dir?)", path);
+        snprintf(err, ecap, "cannot read %.200s (not a project dir?)", path);
         return -1;
     }
 
@@ -889,17 +896,17 @@ static int build_elf(const char *out, const flint_prog *p, flint_mem_mode mem,
 
     f = fopen(out, "wb");
     if (!f) {
-        snprintf(err, errsz, "%s: cannot write (%s)", out, strerror(errno));
+        snprintf(err, errsz, "%.300s: cannot write (%s)", out, strerror(errno));
         return -1;
     }
 
     if (append_file(f, FLINT_STUB_PATH, err, errsz) != 0) ok = 0;
     if (ok && fwrite(p->code, 1, p->code_size, f) != p->code_size) {
-        snprintf(err, errsz, "%s: write failed", out);
+        snprintf(err, errsz, "%.300s: write failed", out);
         ok = 0;
     }
     if (ok && fwrite(p->mem, 1, p->mem_size, f) != p->mem_size) {
-        snprintf(err, errsz, "%s: write failed", out);
+        snprintf(err, errsz, "%.300s: write failed", out);
         ok = 0;
     }
     if (ok) {
@@ -910,16 +917,16 @@ static int build_elf(const char *out, const flint_prog *p, flint_mem_mode mem,
         elf_put_u32(tr + 16, p->heap_start);
         elf_put_u32(tr + 20, (uint32_t)mem);
         if (fwrite(tr, 1, sizeof tr, f) != sizeof tr) {
-            snprintf(err, errsz, "%s: write failed", out);
+            snprintf(err, errsz, "%.300s: write failed", out);
             ok = 0;
         }
     }
     if (fclose(f) != 0) {
-        if (ok) snprintf(err, errsz, "%s: write failed", out);
+        if (ok) snprintf(err, errsz, "%.300s: write failed", out);
         ok = 0;
     }
     if (ok && chmod(out, 0755) != 0) {
-        snprintf(err, errsz, "%s: cannot chmod 0755 (%s)", out,
+        snprintf(err, errsz, "%.300s: cannot chmod 0755 (%s)", out,
                  strerror(errno));
         ok = 0;
     }
