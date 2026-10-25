@@ -1,6 +1,44 @@
 # Changelog
 
-## Unreleased
+## 0.4.0-pre.1 — 2026-10-25
+
+### Added
+
+- `lib/sha256.flt`: complete SHA-256 (FIPS 180-4) — bitwise core with
+  no tables, message schedule, hash state, round counter and padding all
+  in `enter`/`leave` frames. `s_sha256(r1 = data, r2 = len, r3 = out)`
+  writes the 32-byte digest and returns `out`. No allocation, no static
+  scratch: reentrant and safe under host-level threads; works in manual
+  and auto modes.
+- `tests/sha256_test.flt`: FIPS 180-4 vectors (`""`, `"abc"`, the
+  56-byte message that exercises two-block padding). Wired into
+  `make test`.
+- `lib/base64.flt`: RFC 4648 encoder + decoder over caller buffers.
+  `s_b64_encode(src, len, dst)` returns chars written;
+  `s_b64_decode(src, len, dst)` returns bytes written or −1 on invalid
+  input (skips whitespace, accepts unpadded final groups);
+  `s_b64_encoded_len(len)` sizes the output buffer. No allocation, no
+  static scratch.
+- `tests/base64_test.flt`: RFC 4648 vectors, padded / unpadded /
+  whitespace decode, invalid-input cases and a 300-byte round-trip.
+  Wired into `make test`.
+- **Host-level multithreading**: `flint run <file> --threads N` runs N
+  isolated VM instances in N OS threads, and
+  `flint_run_parallel(filename, num_threads, stack_size)` is the
+  embedding entry point. Every worker reads (or assembles) its own copy
+  — code, memory and stack are fully isolated; stdout is shared, so
+  output may interleave at print granularity. A `--threads 4` run is
+  part of `make test`.
+
+### Changed
+
+- `lib/stdlib.flt`: `s_num` no longer uses a static scratch buffer — it
+  prints digit-by-digit through `sys 1`, so the standard library has no
+  mutable static state left and is fully reentrant.
+- `Makefile`: `-pthread` on the CLI and stub links; `make test` gained
+  SHA-256, base64 and `--threads` checks.
+
+## 0.3.0-pre.3 — 2026-10-25
 
 ### Added
 

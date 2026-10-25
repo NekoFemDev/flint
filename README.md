@@ -1,4 +1,4 @@
-# FLINT 0.3.0-pre.2
+# FLINT 0.4.0-pre.1
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.
@@ -75,6 +75,7 @@ flint build <file.flt|dir> [-o out] [--elf]  build .fbc image / standalone ELF
 flint run <file.flt|file.fbc>            run a source file or a built image
 flint run [dir]                          run a project (default: current directory)
 flint run [<arg>] [--gc-stats] [--gc-stress] [--memory auto|manual]
+flint run <file.flt|file.fbc> --threads N    N VM instances in N OS threads
 flint check <file.flt|file.fbc>          assemble/validate without executing
 flint check [dir]                        check a project
 flint dis <file.flt|file.fbc>            print bytecode disassembly
@@ -89,6 +90,15 @@ run; `--gc-stress` forces a collection before every allocation;
 directory (and a `.fbc` image's stored model). The environment variables
 `FLINT_GC_STRESS=1` and `FLINT_GC_STATS=1` do the same without flags —
 the standalone ELF stub honors them too.
+
+`--threads N` runs N isolated VM instances of one source file or `.fbc`
+image, each in its own OS thread: every thread reads (or assembles) its
+own copy, so code, memory and stack are fully isolated — only stdout is
+shared, so output may interleave at print granularity. Not combinable
+with the GC flags; the exit code is 0 when every thread finished with
+`r0 = 0`, otherwise the first non-zero/trapped thread's code. Embedders
+can call `flint_run_parallel(filename, num_threads, stack_size)`
+directly.
 
 CLI exit codes:
 
@@ -293,7 +303,9 @@ lib/stdlib.flt  print/strlen/memcpy/memset/itoa/num (CLI syscalls)
 lib/string.flt  strcpy/strcat/strcmp/upper/lower
 lib/crc32.flt   CRC-32/ISO-HDLC; one-shot + streaming, no allocation
 lib/crc32c.flt  CRC-32C / Castagnoli; one-shot + streaming, no allocation
-lib/progress.flt минимальный прогресс-бар (типа tqdm): \r[####....] pct% + примитивный ETA
+lib/sha256.flt  SHA-256 (FIPS 180-4); s_sha256(data, len, out) -> out
+lib/base64.flt  RFC 4648 encode/decode; caller buffers, no static scratch
+lib/progress.flt minimal tqdm-style progress bar: \r[####....] pct% + rough ETA
 ```
 
 `crc32.flt` exposes `s_crc32(r1 = data, r2 = len)` for a complete
@@ -301,6 +313,19 @@ checksum, and `s_crc32_update(r1 = crc, r2 = data, r3 = len)` for
 streaming; streaming callers start at `0xFFFFFFFF` and apply the final
 `0xFFFFFFFF` xor themselves. It is reentrant and works in both memory
 models.
+
+`sha256.flt` exposes `s_sha256(r1 = data, r2 = len, r3 = out)`: it
+writes the 32-byte digest and returns `out`. The message schedule, the
+hash state, the round counter and the padding all live in
+`enter`/`leave` frames — no allocation, no static scratch, reentrant.
+Works in manual and auto modes.
+
+`base64.flt` exposes `s_b64_encode(r1 = src, r2 = len, r3 = dst)`
+(returns the number of chars written; size `dst` with
+`s_b64_encoded_len(len)`) and `s_b64_decode(r1 = src, r2 = len,
+r3 = dst)` (returns bytes written, or −1 on invalid input — it skips
+whitespace and accepts unpadded final groups). No allocation, no static
+scratch; both are reentrant.
 
 ### Memory operands
 
@@ -640,7 +665,9 @@ tests/regs.flt    r0 = 15 … r15 = 0                   (register dump)
 tests/libdemo.flt 63 / 9 / 11 / HELLO WORLD           (stdlib + string includes)
 tests/crc32_test.flt empty / 123456789 / fox / incremental (CRC-32 known vectors)
 tests/crc32c_test.flt empty / 123456789 / fox / abc / incremental (CRC-32C known vectors)
-tests/progress_test.flt 0% / 25% / 50% / 75% / 100% (мини-progress bar)
+tests/progress_test.flt 0% / 25% / 50% / 75% / 100% (mini progress bar)
+tests/sha256_test.flt empty / abc / long NIST vectors (SHA-256)
+tests/base64_test.flt RFC 4648 vectors + padded/unpadded/whitespace decode + round-trip
 tests/mem.flt     flint                               (s_memset/s_memcpy via .include)
 tests/heap.flt    heap mode: manual + heap ok         (alloc/free + persistent allocations)
 ```
