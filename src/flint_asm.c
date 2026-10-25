@@ -330,8 +330,19 @@ static int sym_find(asmx *a, const char *name)
 
 static void full_local(asmx *a, const char *l, char *out, unsigned n)
 {
-    if (l[0] == '.') snprintf(out, n, "%s%s", a->last_global, l);
-    else             snprintf(out, n, "%s", l);
+    /* compose "global.local" (or pass l through); the explicit bounded
+     * copy keeps the historical snprintf truncation behavior without the
+     * -Wformat-truncation diagnostic newer GCC emits for "%s%s" */
+    size_t gl, ll;
+
+    if (n == 0) return;
+    gl = (l[0] == '.') ? strlen(a->last_global) : 0;
+    ll = strlen(l);
+    if (gl > (size_t)n - 1) gl = (size_t)n - 1;
+    if (ll > (size_t)n - 1 - gl) ll = (size_t)n - 1 - gl;
+    if (gl) memcpy(out, a->last_global, gl);
+    memcpy(out + gl, l, ll);
+    out[gl + ll] = '\0';
 }
 
 static int fx_add(asmx *a, uint32_t at, const char *name, int want, int buf)

@@ -3,6 +3,12 @@
  * This TU is the "OS" for FLINT programs. Embeddable hosts replace it
  * with their own syscall table and skip the CLI layer entirely.
  */
+
+/* realpath() is POSIX, and glibc hides its declaration under -std=c99
+ * unless a feature-test macro asks for it; GCC 14+ then turns the
+ * missing declaration into a hard error. */
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
