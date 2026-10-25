@@ -37,7 +37,9 @@ jobs:
           cp build/stub.elf "dist/$name/build/stub.elf"
           cp -r lib "dist/$name/lib"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+          # bare filename inside the checksum file: sha256sum -c works
+          # from any directory the archive is downloaded to
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
 
       - name: Attach to the release
         env:
