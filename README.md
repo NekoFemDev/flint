@@ -650,8 +650,9 @@ make clean
 
 Tagged releases also ship prebuilt archives (x86_64 Linux built and
 tested by the release workflow, aarch64 Termux built locally); each
-contains `flint` and `build/stub.elf`, so `flint build --elf` works from
-the extracted directory.
+contains `flint`, `build/stub.elf` and the standard `lib/`, so programs
+with `include` and `flint build --elf` both work from the extracted
+directory.
 
 Embedding is minimal: `flint_core.c` + `flint_gc.c` (+ `flint_asm.c` if
 you want source assembly) is one TU each; build with `-I include`.

@@ -21,9 +21,11 @@ Build fix for Linux, plus the first prebuilt binaries.
 
 ## Prebuilt binaries
 
-Attached to this release — each archive contains `flint` and
-`build/stub.elf` (keep that layout: `flint build --elf` looks for the stub
-at `build/stub.elf` relative to the working directory):
+Attached to this release — each archive contains `flint`,
+`build/stub.elf` and the standard `lib/` sources, so `include "stdlib.flt"`
+and `flint build --elf` both work from the extracted directory (keep the
+layout: `flint build --elf` looks for the stub at `build/stub.elf`
+relative to the working directory):
 
 | File | Built by | Notes |
 |------|----------|-------|
