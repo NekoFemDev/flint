@@ -9,9 +9,16 @@
   declaration into a hard error, so `make` failed on e.g. Arch.
   `src/flint_cli.c` now defines `_POSIX_C_SOURCE 200809L` before its
   includes.
-- `-Wformat-truncation` warnings from `full_local()` on newer GCC: the
-  `"%s%s"` composition uses explicit bounded copies with the same
-  truncation behavior.
+- **glibc fortify abort on every `include`**: the include loader passed
+  a 1 KiB buffer to `realpath()`, but glibc's `__realpath_chk`
+  (`_FORTIFY_SOURCE=3`, Ubuntu's default) requires `PATH_MAX + 1` bytes
+  when a buffer is supplied — any program using `include "..."` aborted
+  with "buffer overflow detected". `inc_load` now calls
+  `realpath(path, NULL)` (malloc'd result). Caught by the new release
+  workflow on its first run.
+- `-Wformat-truncation` warnings from `full_local()` and the CLI error
+  messages on newer GCC are gone (explicit bounded copies; precision
+  bounds on paths).
 
 ### Added
 

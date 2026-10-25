@@ -9,8 +9,15 @@ Build fix for Linux, plus the first prebuilt binaries.
   feature-test macro is defined, and GCC 14 turns the implicit declaration
   into a hard error. `src/flint_cli.c` now defines
   `_POSIX_C_SOURCE 200809L` before its includes.
-- `-Wformat-truncation` warnings from `full_local()` on newer GCC are
-  gone (explicit bounded copies, same truncation behavior).
+- **`include` aborted on fortify glibc builds** (Ubuntu's default
+  `_FORTIFY_SOURCE=3`): the include loader gave `realpath()` a 1 KiB
+  buffer, while glibc's `__realpath_chk` requires `PATH_MAX + 1` bytes —
+  every program using `include "..."` died with "buffer overflow
+  detected". It now uses `realpath(path, NULL)`. Caught by the new Linux
+  CI on its very first run.
+- `-Wformat-truncation` warnings from `full_local()` and the CLI error
+  messages on newer GCC are gone (explicit bounded copies, precision
+  bounds on paths).
 
 ## Prebuilt binaries
 
