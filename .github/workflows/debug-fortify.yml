@@ -1,0 +1,34 @@
+# debug-fortify — TEMPORARY diagnostic for the glibc fortify abort on
+# Ubuntu. Dispatch manually; remove once the bug is fixed.
+#   gh workflow run debug-fortify.yml
+name: debug-fortify
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v0.4.0-pre.2
+
+      - name: Build
+        run: make
+
+      - name: Isolate the abort
+        run: |
+          set +e
+          ./build/flint --version;       echo "version rc=$?"
+          ./build/flint check tests/hello.flt; echo "check rc=$?"
+          ./build/flint run tests/hello.flt;   echo "run rc=$?"
+          ./build/flint tests/hello.flt;       echo "convenience rc=$?"
+          ./build/flint run tests/sum.flt;     echo "sum rc=$?"
+
+      - name: Backtrace
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdb
+          gdb -batch -ex 'set pagination off' -ex run -ex bt \
+            --args ./build/flint check tests/hello.flt || true
