@@ -11,8 +11,8 @@
 // s_memset(r1, r2, r3)   r0 = dst; fill r3 bytes at r1 with byte r2
 // s_itoa(r1, r2)         decimal text of value r1 into buffer at r2 (>= 22
 //                        bytes); r0 = buf, NUL-terminated, sign first
-// s_num(r1)              print r1 in decimal (uses the internal buffer
-//                        below — NOT reentrant)
+// s_num(r1)              print r1 in decimal via sys 1 (no buffer at all —
+//                        reentrant and safe under host-level threads)
 //
 // Host slots (CLI): sys 0 = print span (r1 = addr, r2 = len; raw bytes,
 // clobbers nothing), sys 1 = putc (r0 = one byte), sys 2 = getc -> r0.
@@ -143,16 +143,38 @@ s_itoa:                         // r1 = value, r2 = buf; r0 = buf
 .it_done:
     return
 
-s_num:                          // print r1 as decimal (static scratch)
-    copy r5, r1
-    set r2, s_num_buf
-    copy r1, r5
-    call s_itoa
-    copy r1, r0
+s_num:                          // print r1 as decimal via sys 1; r0 = 0
+    copy r4, r1
+    jump.ge r4, 0, .sn_pos
+    set r5, 1
+    shl r5, r5, 63              // INT64_MIN has no positive int64 magnitude
+    jump.ne r4, r5, .sn_neg
+    set r1, s_itoa_lit
     call s_print
+    set r0, 0
+    return
+.sn_neg:
+    neg r4, r4                  // magnitude of a normal negative
+    set r0, 45                  // '-'
+    sys 1
+.sn_pos:                        // r4 = non-negative magnitude
+    set r5, 1                   // divisor: largest power of 10 <= r4
+    set r6, 10
+.sn_scale:
+    div r7, r4, r5
+    jump.lt r7, r6, .sn_emit
+    mul r5, r5, r6
+    jump .sn_scale
+.sn_emit:
+    div r7, r4, r5              // leading digit
+    mod r4, r4, r5              // remainder
+    set r0, 48
+    add r0, r0, r7
+    sys 1
+    div r5, r5, r6              // next lower power of 10
+    jump.ne r5, .sn_emit
     set r0, 0
     return
 
 data:
-s_num_buf:  bytes 24            // s_num scratch (zeroed at load)
 s_itoa_lit: str "-9223372036854775808", 0
