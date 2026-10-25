@@ -18,17 +18,43 @@
  *   9  unlink     r0 = path addr -> 0 or -1
  *   10 time       -> r0 = epoch seconds
  *   11 regs       debug dump r0..r15 (not part of the stable ABI)
- * Slots 0..6 are the generic standard set (flint.h FLINT_SYS_*); 7..9 are
- * the CLI file-meta set; 10..11 are the CLI time/debug extensions. */
+ *   12 argc       -> r0 = number of program arguments
+ *   13 getarg     r0 = index, r1 = buf, r2 = cap -> full length or -1
+ *   14 getenv     r0 = name, r1 = buf, r2 = cap -> full length or -1
+ *   15 lseek      r0 = fd, r1 = offset, r2 = whence (0/1/2) -> offset, -1
+ *   16 rename     r0 = old path, r1 = new path -> 0 or -1
+ *   17 rmdir      r0 = path -> 0 or -1
+ *   18 opendir    r0 = path -> handle or -1
+ *   19 readdir    r0 = handle, r1 = buf, r2 = cap -> name length,
+ *                 0 = end of directory, -1 = bad handle/error
+ *   20 closedir   r0 = handle -> 0 or -1
+ * Slots 0..6 are the generic standard set (flint.h FLINT_SYS_*); 7..20
+ * are the CLI extensions (7..9 file-meta, 10..11 time/debug, 12..14
+ * args/env, 15..20 files/dirs). */
 enum {
     CLI_SYS_STAT   = 7,
     CLI_SYS_MKDIR  = 8,
     CLI_SYS_UNLINK = 9,
     CLI_SYS_TIME   = 10,
-    CLI_SYS_REGS   = 11
+    CLI_SYS_REGS   = 11,
+    CLI_SYS_ARGC   = 12,
+    CLI_SYS_GETARG = 13,
+    CLI_SYS_GETENV = 14,
+    CLI_SYS_LSEEK  = 15,
+    CLI_SYS_RENAME = 16,
+    CLI_SYS_RMDIR  = 17,
+    CLI_SYS_OPENDIR  = 18,
+    CLI_SYS_READDIR  = 19,
+    CLI_SYS_CLOSEDIR = 20
 };
 
 void flint_cli_sysoff(flint_vm *vm);
+
+/* program arguments for the next run (sys 12..14): the front-end passes
+ * the argv tail that followed the script or project, the stub passes
+ * its own process argv minus argv[0]. The pointers must stay valid
+ * while the program runs; `--threads` runs never call this. */
+void flint_cli_set_args(int argc, char **argv);
 
 /* file predicates (used by main dispatch) */
 int has_flint_ext_public(const char *s);   /* .flt source            */

@@ -26,6 +26,8 @@ static void usage(FILE *o)
         "                                  image, or a standalone ELF\n"
         "  flint run <file.flt|file.fbc>   run source, or a built image\n"
         "  flint run [dir]        run a project (default: cwd)\n"
+        "  flint run <file|dir> [args...]  program args reach the program\n"
+        "                         via sys 12..14 (argc/getarg/getenv)\n"
         "           [--gc-stats] [--gc-stress] [--memory auto|manual]\n"
         "  flint run <file> --threads N    run N isolated VM instances in\n"
         "                                  N OS threads (each reads and runs\n"
@@ -130,6 +132,8 @@ static int cmd_run_args(int argc, char **argv)
     flint_run_opts o;
     const char *arg = 0;
     int threads = 0, threads_given = 0;
+    char *prog_args[256];
+    int prog_n = 0;
     int i;
 
     o.gc_stats = 0; o.gc_stress = 0;
@@ -177,8 +181,13 @@ static int cmd_run_args(int argc, char **argv)
         } else if (arg == 0) {
             arg = argv[i];
         } else {
-            fprintf(stderr, "flint run: unexpected argument %s\n", argv[i]);
-            return 2;
+            /* everything after the file/project is a program argument
+             * (sys 12..14: argc / getarg / getenv) */
+            if (prog_n >= (int)(sizeof prog_args / sizeof prog_args[0])) {
+                fprintf(stderr, "flint run: too many program arguments\n");
+                return 2;
+            }
+            prog_args[prog_n++] = argv[i];
         }
     }
 
@@ -188,12 +197,18 @@ static int cmd_run_args(int argc, char **argv)
                             "--gc-stats/--gc-stress/--memory\n");
             return 2;
         }
+        if (prog_n > 0) {
+            fprintf(stderr,
+                    "flint run: --threads takes no program arguments\n");
+            return 2;
+        }
         if (arg == 0) {
             fprintf(stderr, "flint run: --threads needs a .flt or .fbc file\n");
             return 2;
         }
         return flint_run_parallel(arg, threads, 65536);
     }
+    flint_cli_set_args(prog_n, prog_args);
     return flint_cli_cmd_run_opts(arg, &o);
 }
 

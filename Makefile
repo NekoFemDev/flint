@@ -98,6 +98,10 @@ test: $(TESTS) $(BIN) $(STUB)
 	  && ./$(BIN) tests/progress_test.flt | grep -q "50%" \
 	  && ./$(BIN) tests/progress_test.flt | grep -q "75%" \
 	  && ./$(BIN) tests/progress_test.flt | grep -q "100%" \
+	  && ./$(BIN) tests/string_test.flt | grep -q "string: ok" \
+	  && ./$(BIN) tests/math_test.flt   | grep -q "math: ok" \
+	  && ./$(BIN) tests/fsops.flt       | grep -q "fs: ok" \
+	  && ./$(BIN) run tests/args.flt alpha beta | grep -q "args: ok" \
 	  && ./$(BIN) tests/heap.flt  | grep -q "heap ok"       \
 	  && ./$(BIN) tests/heap.flt  | grep -q "mode: manual"  \
 	  && ./$(BIN) tests/mem.flt   | grep -q "flint"

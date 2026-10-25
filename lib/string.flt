@@ -10,6 +10,20 @@
 //                                lexicographic)
 // s_upper(r1)                    uppercases ASCII a..z in place, r0 = r1
 // s_lower(r1)                    lowercases ASCII A..Z in place, r0 = r1
+// s_atoi(r1 = zstr)              r0 = parsed int64: skips leading space/
+//                                tab/CR/LF, accepts one optional +/-,
+//                                stops at the first non-digit; 0 when
+//                                no digits were read; overflow wraps
+// s_find(r1 = hay, r2 = needle)  r0 = index of the first occurrence, or
+//                                -1; the empty needle matches at index 0
+// s_chr(r1 = zstr, r2 = byte)    r0 = index of the first matching byte,
+//                                or -1; searching for 0 finds the
+//                                terminator (r0 = length)
+// s_starts_with(r1, r2)          r0 = 1 when r2 is a prefix of r1, else 0
+// s_ends_with(r1, r2)            r0 = 1 when r2 is a suffix of r1, else 0
+// s_trim(r1)                     strips leading/trailing space, tab, CR
+//                                and LF in place; r0 = r1
+// s_reverse(r1)                  reverses in place; r0 = r1
 
 // lib/ includes must own their section state: start with code:
 
@@ -103,5 +117,230 @@ s_lower:                        // in-place ASCII lowercase; r0 = r1
     inc r5
     jump .slo_loop
 .slo_done:
+    copy r0, r1
+    return
+
+s_atoi:                         // r1 = zstr; r0 = parsed value
+    copy r5, r1
+.atoi_skip:                     // skip space, tab, CR, LF
+    load.byte r6, [r5+0]
+    set r7, 32
+    jump.eq r6, r7, .atoi_next
+    set r7, 9
+    jump.eq r6, r7, .atoi_next
+    set r7, 10
+    jump.eq r6, r7, .atoi_next
+    set r7, 13
+    jump.eq r6, r7, .atoi_next
+    jump .atoi_sign
+.atoi_next:
+    inc r5
+    jump .atoi_skip
+.atoi_sign:                     // r4 = 1 or -1
+    set r4, 1
+    set r7, 45                  // '-'
+    jump.ne r6, r7, .atoi_plus
+    set r4, -1
+    inc r5
+    jump .atoi_digits
+.atoi_plus:
+    set r7, 43                  // '+'
+    jump.ne r6, r7, .atoi_digits
+    inc r5
+.atoi_digits:
+    set r0, 0
+.atoi_loop:
+    load.byte r6, [r5+0]
+    set r7, 48                  // '0'
+    jump.lt r6, r7, .atoi_end
+    set r7, 58                  // '9' + 1
+    jump.ge r6, r7, .atoi_end
+    sub r6, r6, 48
+    mul r0, r0, 10
+    add r0, r0, r6
+    inc r5
+    jump .atoi_loop
+.atoi_end:
+    set r7, 1
+    jump.eq r4, r7, .atoi_out
+    neg r0, r0
+.atoi_out:
+    return
+
+s_find:                         // r1 = haystack, r2 = needle
+    load.byte r7, [r2+0]
+    jump.ne r7, .find_go
+    set r0, 0                   // empty needle: matches at index 0
+    return
+.find_go:
+    copy r5, r1                 // candidate start
+.find_try:
+    load.byte r7, [r5+0]
+    jump.eq r7, .find_none      // end of the haystack
+    copy r4, r5                 // attempt cursor
+    copy r6, r2                 // needle cursor
+.find_cmp:
+    load.byte r0, [r6+0]
+    jump.eq r0, .find_hit       // needle exhausted here: match
+    load.byte r7, [r4+0]
+    jump.ne r7, r0, .find_next
+    inc r4
+    inc r6
+    jump .find_cmp
+.find_next:
+    inc r5
+    jump .find_try
+.find_hit:
+    sub r0, r5, r1              // index = start - base
+    return
+.find_none:
+    set r0, -1
+    return
+
+s_chr:                          // r1 = zstr, r2 = byte value
+    copy r5, r1
+.chr_loop:
+    load.byte r4, [r5+0]
+    jump.eq r4, r2, .chr_hit
+    jump.eq r4, .chr_none       // reached the terminator
+    inc r5
+    jump .chr_loop
+.chr_hit:
+    sub r0, r5, r1
+    return
+.chr_none:
+    set r0, -1
+    return
+
+s_starts_with:                  // r1 = zstr, r2 = prefix
+    copy r5, r1
+    copy r6, r2
+.sw_loop:
+    load.byte r7, [r6+0]
+    jump.eq r7, .sw_yes         // prefix exhausted: it is a prefix
+    load.byte r4, [r5+0]
+    jump.ne r4, r7, .sw_no
+    inc r5
+    inc r6
+    jump .sw_loop
+.sw_yes:
+    set r0, 1
+    return
+.sw_no:
+    set r0, 0
+    return
+
+s_ends_with:                    // r1 = zstr, r2 = suffix
+    copy r5, r1
+    set r4, 0                   // len(r1)
+.ew_len1:
+    load.byte r7, [r5+0]
+    jump.eq r7, .ew_len1_done
+    inc r5
+    inc r4
+    jump .ew_len1
+.ew_len1_done:
+    copy r6, r2
+    set r7, 0                   // len(r2)
+.ew_len2:
+    load.byte r0, [r6+0]
+    jump.eq r0, .ew_len2_done
+    inc r6
+    inc r7
+    jump .ew_len2
+.ew_len2_done:
+    jump.lt r4, r7, .ew_no      // suffix longer than the string
+    sub r5, r5, r7              // NUL -> suffix start
+    copy r6, r2
+.ew_cmp:
+    load.byte r7, [r6+0]
+    jump.eq r7, .ew_yes
+    load.byte r4, [r5+0]
+    jump.ne r4, r7, .ew_no
+    inc r5
+    inc r6
+    jump .ew_cmp
+.ew_yes:
+    set r0, 1
+    return
+.ew_no:
+    set r0, 0
+    return
+
+s_trim:                         // r1 = zstr; strips space/tab/CR/LF
+    copy r5, r1
+.trim_lead:
+    load.byte r6, [r5+0]
+    set r7, 32
+    jump.eq r6, r7, .trim_next
+    set r7, 9
+    jump.eq r6, r7, .trim_next
+    set r7, 10
+    jump.eq r6, r7, .trim_next
+    set r7, 13
+    jump.eq r6, r7, .trim_next
+    jump .trim_tail
+.trim_next:
+    inc r5
+    jump .trim_lead
+.trim_tail:
+    copy r4, r5                 // walk to the terminator
+.trim_scan:
+    load.byte r6, [r4+0]
+    jump.eq r6, .trim_back
+    inc r4
+    jump .trim_scan
+.trim_back:                     // r4: last kept byte + 1
+    jump.eq r4, r5, .trim_empty
+    dec r4
+    load.byte r6, [r4+0]
+    set r7, 32
+    jump.eq r6, r7, .trim_back
+    set r7, 9
+    jump.eq r6, r7, .trim_back
+    set r7, 10
+    jump.eq r6, r7, .trim_back
+    set r7, 13
+    jump.eq r6, r7, .trim_back
+    inc r4
+    jump .trim_shift
+.trim_empty:
+    copy r4, r5
+.trim_shift:                    // move [r5, r4) to the front; terminate
+    copy r6, r1
+    copy r7, r5
+.trim_copy:
+    jump.eq r7, r4, .trim_term
+    load.byte r0, [r7+0]
+    store.byte [r6+0], r0
+    inc r6
+    inc r7
+    jump .trim_copy
+.trim_term:
+    set r0, 0
+    store.byte [r6+0], r0
+    copy r0, r1
+    return
+
+s_reverse:                      // r1 = zstr
+    copy r5, r1
+    copy r6, r1
+.rev_end:
+    load.byte r7, [r6+0]
+    jump.eq r7, .rev_prep
+    inc r6
+    jump .rev_end
+.rev_prep:
+    dec r6                      // last byte
+.rev_loop:
+    jump.ge r5, r6, .rev_done
+    load.byte r7, [r5+0]
+    load.byte r4, [r6+0]
+    store.byte [r6+0], r7
+    store.byte [r5+0], r4
+    inc r5
+    dec r6
+    jump .rev_loop
+.rev_done:
     copy r0, r1
     return

@@ -1,0 +1,421 @@
+// string — every lib/string.flt helper: the original five plus
+// atoi / find / chr / starts_with / ends_with / trim / reverse.
+// One "<name>:ok" line per check; the last line is "string: ok"
+// (or "string: FAIL" with a non-zero exit code).
+//
+// Run: flint run tests/string_test.flt
+
+include "stdlib.flt"
+include "string.flt"
+
+data:
+s_ok:     str "ok", 0
+s_bad:    str "bad", 0
+l_pass:   str "string: ok", 10, 0
+l_fail:   str "string: FAIL", 10, 0
+
+l_strcpy:  str "strcpy:", 0
+l_strcat:  str "strcat:", 0
+l_cmp_eq:  str "strcmp-eq:", 0
+l_cmp_gt:  str "strcmp-gt:", 0
+l_cmp_lt:  str "strcmp-lt:", 0
+l_upper:   str "upper:", 0
+l_lower:   str "lower:", 0
+l_at42:    str "atoi-42:", 0
+l_at17:    str "atoi-neg:", 0
+l_at5:     str "atoi-plus:", 0
+l_at0:     str "atoi-none:", 0
+l_at12:    str "atoi-stop:", 0
+l_find_w:  str "find-sub:", 0
+l_find_o:  str "find-char:", 0
+l_find_x:  str "find-none:", 0
+l_find_e:  str "find-empty:", 0
+l_chr_l:   str "chr:", 0
+l_chr_z:   str "chr-none:", 0
+l_chr_0:   str "chr-nul:", 0
+l_sw_he:   str "starts-yes:", 0
+l_sw_lo:   str "starts-no:", 0
+l_sw_e:    str "starts-empty:", 0
+l_ew_yes:  str "ends-yes:", 0
+l_ew_he:   str "ends-no:", 0
+l_ew_e:    str "ends-empty:", 0
+l_ew_long: str "ends-long:", 0
+l_trim:    str "trim:", 0
+l_trim_no: str "trim-none:", 0
+l_trim_all: str "trim-all:", 0
+l_trim_wt: str "trim-mixed:", 0
+l_rev:     str "reverse:", 0
+l_rev_e:   str "reverse-empty:", 0
+
+src:      str "flint", 0
+tail:     str " lang", 0
+exp_a:    str "flint lang", 0
+exp_up:   str "MIXED", 0
+exp_lo:   str "mixed", 0
+exp_hi:   str "hi", 0
+exp_no:   str "no", 0
+exp_e:    str "", 0
+exp_x:    str "x", 0
+exp_cba:  str "cba", 0
+hay:      str "hello world", 0
+ab:       str "abc", 0
+abd:      str "abd", 0
+needle_w: str "world", 0
+needle_o: str "o", 0
+needle_x: str "xyz", 0
+needle_e: str "", 0
+pre_he:   str "he", 0
+pre_lo:   str "lo", 0
+n42:      str "42", 0
+n17:      str "  -17", 0
+n5:       str "+5", 0
+nabc:     str "abc", 0
+n12x:     str "12x", 0
+case_in:  str "MiXeD", 0
+sp_hi:    str "  hi  ", 0
+sp_only:  str "   ", 0
+sp_x:     str "\t x \n", 0
+buf1:     bytes 32
+buf2:     bytes 32
+buf3:     bytes 32
+buf4:     bytes 32
+w_fails:  int 0
+
+code:
+main:
+    // s_strcpy: buf1 = "flint"
+    set r1, buf1
+    set r2, src
+    call s_strcpy
+    set r1, buf1
+    set r2, src
+    call s_strcmp
+    copy r2, r0
+    set r1, l_strcpy
+    set r3, 0
+    call expect
+
+    // s_strcat: "flint" + " lang"
+    set r1, buf2
+    set r2, src
+    call s_strcpy
+    set r1, buf2
+    set r2, tail
+    call s_strcat
+    set r1, buf2
+    set r2, exp_a
+    call s_strcmp
+    copy r2, r0
+    set r1, l_strcat
+    set r3, 0
+    call expect
+
+    // s_strcmp: equal / greater / less
+    set r1, ab
+    set r2, ab
+    call s_strcmp
+    copy r2, r0
+    set r1, l_cmp_eq
+    set r3, 0
+    call expect
+    set r1, abd
+    set r2, ab
+    call s_strcmp
+    copy r2, r0
+    set r1, l_cmp_gt
+    set r3, 1
+    call expect
+    set r1, ab
+    set r2, abd
+    call s_strcmp
+    copy r2, r0
+    set r1, l_cmp_lt
+    set r3, -1
+    call expect
+
+    // s_upper / s_lower mutate in place
+    set r1, buf3
+    set r2, case_in
+    call s_strcpy
+    set r1, buf3
+    call s_upper
+    set r1, buf3
+    set r2, exp_up
+    call s_strcmp
+    copy r2, r0
+    set r1, l_upper
+    set r3, 0
+    call expect
+    set r1, buf4
+    set r2, case_in
+    call s_strcpy
+    set r1, buf4
+    call s_lower
+    set r1, buf4
+    set r2, exp_lo
+    call s_strcmp
+    copy r2, r0
+    set r1, l_lower
+    set r3, 0
+    call expect
+
+    // s_atoi
+    set r1, n42
+    call s_atoi
+    copy r2, r0
+    set r1, l_at42
+    set r3, 42
+    call expect
+    set r1, n17
+    call s_atoi
+    copy r2, r0
+    set r1, l_at17
+    set r3, -17
+    call expect
+    set r1, n5
+    call s_atoi
+    copy r2, r0
+    set r1, l_at5
+    set r3, 5
+    call expect
+    set r1, nabc
+    call s_atoi
+    copy r2, r0
+    set r1, l_at0
+    set r3, 0
+    call expect
+    set r1, n12x
+    call s_atoi
+    copy r2, r0
+    set r1, l_at12
+    set r3, 12
+    call expect
+
+    // s_find
+    set r1, hay
+    set r2, needle_w
+    call s_find
+    copy r2, r0
+    set r1, l_find_w
+    set r3, 6
+    call expect
+    set r1, hay
+    set r2, needle_o
+    call s_find
+    copy r2, r0
+    set r1, l_find_o
+    set r3, 4
+    call expect
+    set r1, hay
+    set r2, needle_x
+    call s_find
+    copy r2, r0
+    set r1, l_find_x
+    set r3, -1
+    call expect
+    set r1, hay
+    set r2, needle_e
+    call s_find
+    copy r2, r0
+    set r1, l_find_e
+    set r3, 0
+    call expect
+
+    // s_chr
+    set r1, hay
+    set r2, 108                 // 'l'
+    call s_chr
+    copy r2, r0
+    set r1, l_chr_l
+    set r3, 2
+    call expect
+    set r1, hay
+    set r2, 122                 // 'z'
+    call s_chr
+    copy r2, r0
+    set r1, l_chr_z
+    set r3, -1
+    call expect
+    set r1, hay
+    set r2, 0                   // the terminator: index = length
+    call s_chr
+    copy r2, r0
+    set r1, l_chr_0
+    set r3, 11
+    call expect
+
+    // s_starts_with
+    set r1, hay
+    set r2, pre_he
+    call s_starts_with
+    copy r2, r0
+    set r1, l_sw_he
+    set r3, 1
+    call expect
+    set r1, hay
+    set r2, pre_lo
+    call s_starts_with
+    copy r2, r0
+    set r1, l_sw_lo
+    set r3, 0
+    call expect
+    set r1, hay
+    set r2, needle_e
+    call s_starts_with
+    copy r2, r0
+    set r1, l_sw_e
+    set r3, 1
+    call expect
+
+    // s_ends_with
+    set r1, hay
+    set r2, needle_w
+    call s_ends_with
+    copy r2, r0
+    set r1, l_ew_yes
+    set r3, 1
+    call expect
+    set r1, hay
+    set r2, pre_he
+    call s_ends_with
+    copy r2, r0
+    set r1, l_ew_he
+    set r3, 0
+    call expect
+    set r1, hay
+    set r2, needle_e
+    call s_ends_with
+    copy r2, r0
+    set r1, l_ew_e
+    set r3, 1
+    call expect
+    set r1, pre_he             // suffix longer than the string
+    set r2, hay
+    call s_ends_with
+    copy r2, r0
+    set r1, l_ew_long
+    set r3, 0
+    call expect
+
+    // s_trim
+    set r1, buf1
+    set r2, sp_hi
+    call s_strcpy
+    set r1, buf1
+    call s_trim
+    set r1, buf1
+    set r2, exp_hi
+    call s_strcmp
+    copy r2, r0
+    set r1, l_trim
+    set r3, 0
+    call expect
+    set r1, buf1
+    set r2, exp_no
+    call s_strcpy
+    set r1, buf1
+    call s_trim
+    set r1, buf1
+    set r2, exp_no
+    call s_strcmp
+    copy r2, r0
+    set r1, l_trim_no
+    set r3, 0
+    call expect
+    set r1, buf1
+    set r2, sp_only
+    call s_strcpy
+    set r1, buf1
+    call s_trim
+    set r1, buf1
+    set r2, exp_e
+    call s_strcmp
+    copy r2, r0
+    set r1, l_trim_all
+    set r3, 0
+    call expect
+    set r1, buf1
+    set r2, sp_x
+    call s_strcpy
+    set r1, buf1
+    call s_trim
+    set r1, buf1
+    set r2, exp_x
+    call s_strcmp
+    copy r2, r0
+    set r1, l_trim_wt
+    set r3, 0
+    call expect
+
+    // s_reverse
+    set r1, buf1
+    set r2, ab
+    call s_strcpy
+    set r1, buf1
+    call s_reverse
+    set r1, buf1
+    set r2, exp_cba
+    call s_strcmp
+    copy r2, r0
+    set r1, l_rev
+    set r3, 0
+    call expect
+    set r1, buf1
+    set r2, exp_e
+    call s_strcpy
+    set r1, buf1
+    call s_reverse
+    set r1, buf1
+    set r2, exp_e
+    call s_strcmp
+    copy r2, r0
+    set r1, l_rev_e
+    set r3, 0
+    call expect
+
+    // summary: every check above must have passed
+    set r1, w_fails
+    load r1, [r1]
+    jump.ne r1, .t_fail
+    set r1, l_pass
+    call s_print
+    set r0, 0
+    exit
+.t_fail:
+    set r1, l_fail
+    call s_print
+    set r0, 1
+    exit
+
+// expect(r1 = label, r2 = actual, r3 = expected) -> "<label>ok\n" or
+// "<label>bad\n"; a mismatch bumps w_fails.
+expect:
+    enter 32
+    store [fp-8], r1
+    store [fp-16], r2
+    store [fp-24], r3
+    load r1, [fp-8]
+    call s_print
+    load r2, [fp-16]
+    load r3, [fp-24]
+    jump.eq r2, r3, .ex_ok
+    set r1, w_fails
+    load r2, [r1]
+    inc r2
+    store [r1], r2
+    set r1, s_bad
+    call s_print
+    jump .ex_nl
+.ex_ok:
+    set r1, s_ok
+    call s_print
+.ex_nl:
+    call nl
+    leave
+    return
+
+nl:
+    set r0, 10
+    sys 1
+    set r0, 0
+    return

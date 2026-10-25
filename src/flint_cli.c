@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <time.h>
@@ -31,6 +32,19 @@
 
 static int  clif_span(const flint_vm *vm, flint_word addr, flint_word cnt);
 static long clif_strn(const flint_vm *vm, flint_word addr);
+
+/* program arguments for sys 12..14: the front-end registers the argv
+ * tail (the arguments after the script name) before the run, read-only
+ * afterwards. The stub does the same for standalone ELFs (its process
+ * argv minus argv[0]); `--threads` runs register none. */
+static int    cli_prog_argc;
+static char **cli_prog_argv;
+
+void flint_cli_set_args(int argc, char **argv)
+{
+    cli_prog_argc = (argc < 0) ? 0 : argc;
+    cli_prog_argv = argv;
+}
 
 /* SYS 0 (FLINT_SYS_PRINT_STR): write the raw byte span mem[r1 .. r1+r2).
  * Exactly r2 bytes go out — NULs included — and no register is touched. */
@@ -60,8 +74,9 @@ static void std_getc(flint_vm *vm)
 }
 
 /* SYS 3 (FLINT_SYS_OPEN): r0 = path address in mem, r1 = flags
- * (0 read / 1 write). Result: r0 = fd or -1. Write mode creates and
- * truncates; the path must be NUL-terminated inside the memory image. */
+ * (0 read / 1 write / 2 append). Result: r0 = fd or -1. Write mode
+ * creates and truncates, append mode creates and appends; the path must
+ * be NUL-terminated inside the memory image. */
 static void std_open(flint_vm *vm)
 {
     int oflags, fd;
@@ -70,6 +85,7 @@ static void std_open(flint_vm *vm)
     switch (vm->r[1]) {
     case 0: oflags = O_RDONLY; break;
     case 1: oflags = O_WRONLY | O_CREAT | O_TRUNC; break;
+    case 2: oflags = O_WRONLY | O_CREAT | O_APPEND; break;
     default: vm->r[0] = -1; return;
     }
     fd = open((const char *)(vm->mem + vm->r[0]), oflags, 0644);
@@ -193,6 +209,160 @@ static void std_unlink(flint_vm *vm)
     vm->r[0] = 0;
 }
 
+/* host string -> VM buffer: writes min(len, cap-1) bytes plus a NUL and
+ * returns the full length, so len >= cap tells the caller it was
+ * truncated. r1 = buffer, r2 = capacity (validated by the callers). */
+static void copy_host_str(flint_vm *vm, const char *s)
+{
+    flint_word cap = vm->r[2];
+    flint_word len = (flint_word)strlen(s);
+    flint_word n = (len < cap - 1) ? len : cap - 1;
+
+    memcpy(vm->mem + vm->r[1], s, (size_t)n);
+    vm->mem[vm->r[1] + n] = 0;
+    vm->r[0] = len;
+}
+
+/* SYS 12 (CLI_SYS_ARGC): r0 = number of program arguments */
+static void std_argc(flint_vm *vm)
+{
+    vm->r[0] = cli_prog_argc;
+}
+
+/* SYS 13 (CLI_SYS_GETARG): r0 = index, r1 = buffer, r2 = capacity.
+ * Copies the argument as a NUL-terminated string (truncated to
+ * capacity-1 bytes) and returns its full length, or -1 for a bad
+ * index or buffer. */
+static void std_getarg(flint_vm *vm)
+{
+    flint_word i = vm->r[0];
+
+    if (i < 0 || i >= cli_prog_argc || !cli_prog_argv ||
+        !clif_span(vm, vm->r[1], vm->r[2]) || vm->r[2] < 1) {
+        vm->r[0] = -1; return;
+    }
+    copy_host_str(vm, cli_prog_argv[i]);
+}
+
+/* SYS 14 (CLI_SYS_GETENV): r0 = NUL-terminated name, r1 = buffer,
+ * r2 = capacity. Same copy rules as getarg; -1 when the variable is
+ * unset or the arguments are bad. */
+static void std_getenv(flint_vm *vm)
+{
+    const char *val;
+
+    if (clif_strn(vm, vm->r[0]) < 0 ||
+        !clif_span(vm, vm->r[1], vm->r[2]) || vm->r[2] < 1) {
+        vm->r[0] = -1; return;
+    }
+    val = getenv((const char *)(vm->mem + vm->r[0]));
+    if (!val) { vm->r[0] = -1; return; }
+    copy_host_str(vm, val);
+}
+
+/* SYS 15 (CLI_SYS_LSEEK): r0 = fd, r1 = offset, r2 = whence
+ * (0 start / 1 current / 2 end). r0 = new offset or -1. */
+static void std_lseek(flint_vm *vm)
+{
+    flint_word fd = vm->r[0];
+    int whence;
+    off_t off;
+
+    switch (vm->r[2]) {
+    case 0: whence = SEEK_SET; break;
+    case 1: whence = SEEK_CUR; break;
+    case 2: whence = SEEK_END; break;
+    default: vm->r[0] = -1; return;
+    }
+    if (fd < 0 || fd > INT_MAX) { vm->r[0] = -1; return; }
+    off = lseek((int)fd, (off_t)vm->r[1], whence);
+    vm->r[0] = (off < 0) ? (flint_word)-1 : (flint_word)off;
+}
+
+/* SYS 16 (CLI_SYS_RENAME): r0 = old path, r1 = new path -> 0 or -1 */
+static void std_rename(flint_vm *vm)
+{
+    if (clif_strn(vm, vm->r[0]) < 0 || clif_strn(vm, vm->r[1]) < 0 ||
+        rename((const char *)(vm->mem + vm->r[0]),
+               (const char *)(vm->mem + vm->r[1])) != 0) {
+        vm->r[0] = -1; return;
+    }
+    vm->r[0] = 0;
+}
+
+/* SYS 17 (CLI_SYS_RMDIR): r0 = path -> 0 or -1 */
+static void std_rmdir(flint_vm *vm)
+{
+    if (clif_strn(vm, vm->r[0]) < 0 ||
+        rmdir((const char *)(vm->mem + vm->r[0])) != 0) {
+        vm->r[0] = -1; return;
+    }
+    vm->r[0] = 0;
+}
+
+/* ---- directory streams (sys 18..20) ----
+ * A small fixed handle table, mirroring the fd layer; handles are
+ * indices, not pointers. This is CLI-host state: `--threads` runs never
+ * open directories and the REPL is single-threaded. */
+#define CLI_DIRS_MAX 8
+static DIR *cli_dirs[CLI_DIRS_MAX];
+
+/* SYS 18 (CLI_SYS_OPENDIR): r0 = path -> handle >= 0, or -1 */
+static void std_opendir(flint_vm *vm)
+{
+    DIR *d;
+    int i;
+
+    if (clif_strn(vm, vm->r[0]) < 0) { vm->r[0] = -1; return; }
+    d = opendir((const char *)(vm->mem + vm->r[0]));
+    if (!d) { vm->r[0] = -1; return; }
+    for (i = 0; i < CLI_DIRS_MAX; i++) {
+        if (!cli_dirs[i]) {
+            cli_dirs[i] = d;
+            vm->r[0] = i;
+            return;
+        }
+    }
+    closedir(d);
+    vm->r[0] = -1;                      /* handle table full */
+}
+
+/* SYS 19 (CLI_SYS_READDIR): r0 = handle, r1 = buffer, r2 = capacity.
+ * Copies the next entry name (same truncation rules as getarg) and
+ * returns its length; 0 = end of the directory, -1 = bad handle or
+ * error. "." and ".." are passed through like any other entry. */
+static void std_readdir(flint_vm *vm)
+{
+    flint_word h = vm->r[0];
+    struct dirent *e;
+
+    if (h < 0 || h >= CLI_DIRS_MAX || !cli_dirs[h] ||
+        !clif_span(vm, vm->r[1], vm->r[2]) || vm->r[2] < 1) {
+        vm->r[0] = -1; return;
+    }
+    errno = 0;
+    e = readdir(cli_dirs[h]);
+    if (!e) { vm->r[0] = errno ? -1 : 0; return; }
+    copy_host_str(vm, e->d_name);
+}
+
+/* SYS 20 (CLI_SYS_CLOSEDIR): r0 = handle -> 0 or -1 */
+static void std_closedir(flint_vm *vm)
+{
+    flint_word h = vm->r[0];
+
+    if (h < 0 || h >= CLI_DIRS_MAX || !cli_dirs[h]) {
+        vm->r[0] = -1; return;
+    }
+    if (closedir(cli_dirs[h]) != 0) {
+        cli_dirs[h] = 0;
+        vm->r[0] = -1;
+        return;
+    }
+    cli_dirs[h] = 0;
+    vm->r[0] = 0;
+}
+
 /* SYS 10 (CLI_SYS_TIME): time -> r0 = UNIX epoch seconds */
 static void std_time(flint_vm *vm)
 {
@@ -201,7 +371,7 @@ static void std_time(flint_vm *vm)
 
 void flint_cli_sysoff(flint_vm *vm)
 {
-    /* ABI slots 0..6 (flint.h); file-meta 7..9; time/debug 10..11 */
+    /* ABI slots 0..6 (flint.h); CLI extensions 7..20 (see flint_cli.h) */
     flint_sys_set(vm, FLINT_SYS_PRINT_STR, std_print_str);
     flint_sys_set(vm, FLINT_SYS_PUTC,      std_putc);
     flint_sys_set(vm, FLINT_SYS_GETC,      std_getc);
@@ -214,6 +384,15 @@ void flint_cli_sysoff(flint_vm *vm)
     flint_sys_set(vm, CLI_SYS_UNLINK,      std_unlink);
     flint_sys_set(vm, CLI_SYS_TIME,        std_time);
     flint_sys_set(vm, CLI_SYS_REGS,        std_regs);
+    flint_sys_set(vm, CLI_SYS_ARGC,        std_argc);
+    flint_sys_set(vm, CLI_SYS_GETARG,      std_getarg);
+    flint_sys_set(vm, CLI_SYS_GETENV,      std_getenv);
+    flint_sys_set(vm, CLI_SYS_LSEEK,       std_lseek);
+    flint_sys_set(vm, CLI_SYS_RENAME,      std_rename);
+    flint_sys_set(vm, CLI_SYS_RMDIR,       std_rmdir);
+    flint_sys_set(vm, CLI_SYS_OPENDIR,     std_opendir);
+    flint_sys_set(vm, CLI_SYS_READDIR,     std_readdir);
+    flint_sys_set(vm, CLI_SYS_CLOSEDIR,    std_closedir);
 }
 
 /* ---------------- file helpers ---------------- */

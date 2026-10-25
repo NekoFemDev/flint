@@ -42,7 +42,7 @@ static int stub_fail(const char *why)
     return 127;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     FILE *f;
     long file_size, payload_off;
@@ -114,6 +114,9 @@ int main(void)
         if (e && e[0] && e[0] != '0') flint_gc_set_stress(&vm, 1);
     }
     flint_cli_sysoff(&vm);
+    /* sys 12..14: program arguments are the argv tail (argv[0] is the
+     * executable path itself) */
+    flint_cli_set_args(argc - 1, argv + 1);
     rc = flint_run(&vm, entry);
 
     {

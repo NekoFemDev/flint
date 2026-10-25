@@ -1,0 +1,87 @@
+// args — program arguments and environment (sys 12..14):
+//   sys 12 argc            -> number of arguments after the script
+//   sys 13 getarg(i, buf, cap)  -> full length (buf NUL-terminated)
+//   sys 14 getenv(name, buf, cap) -> full length, -1 when unset
+//
+// Run: flint run tests/args.flt alpha beta -> "args: ok"
+// (the make test line passes exactly those two arguments)
+
+include "stdlib.flt"
+include "string.flt"
+
+data:
+l_pass: str "args: ok", 10, 0
+l_fail: str "args: FAIL", 10, 0
+e_x:    str "alpha", 0
+e_y:    str "beta", 0
+e_tr:   str "alp", 0
+env_path: str "PATH", 0
+buf:    bytes 64
+
+code:
+main:
+    // two arguments were passed
+    sys 12
+    set r2, 2
+    jump.ne r0, r2, .bad
+
+    // getarg(0) = "alpha"
+    set r0, 0
+    set r1, buf
+    set r2, 64
+    sys 13
+    set r2, 5
+    jump.ne r0, r2, .bad
+    set r1, buf
+    set r2, e_x
+    call s_strcmp
+    jump.ne r0, .bad
+
+    // getarg(1) = "beta"
+    set r0, 1
+    set r1, buf
+    set r2, 64
+    sys 13
+    set r2, 4
+    jump.ne r0, r2, .bad
+    set r1, buf
+    set r2, e_y
+    call s_strcmp
+    jump.ne r0, .bad
+
+    // a too-small buffer still reports the full length and truncates
+    set r0, 0
+    set r1, buf
+    set r2, 4
+    sys 13                      // "alpha" needs 5 > 4
+    set r2, 5
+    jump.ne r0, r2, .bad
+    set r1, buf
+    set r2, e_tr
+    call s_strcmp
+    jump.ne r0, .bad
+
+    // index past the end -> -1
+    set r0, 2
+    set r1, buf
+    set r2, 64
+    sys 13
+    jump.ne r0, -1, .bad
+
+    // getenv("PATH"): non-empty when set (soft check — skipped if unset)
+    set r0, env_path
+    set r1, buf
+    set r2, 64
+    sys 14
+    jump.lt r0, 0, .pass
+    jump.eq r0, .bad
+.pass:
+    set r1, l_pass
+    call s_print
+    set r0, 0
+    exit
+.bad:
+    set r1, l_fail
+    call s_print
+    set r0, 1
+    exit

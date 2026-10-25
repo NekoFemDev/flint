@@ -1,0 +1,170 @@
+// fsops — the file/directory syscalls beyond the basic round-trip:
+//   sys 3  open append flag (2)     sys 15 lseek
+//   sys 16 rename                   sys 17 rmdir
+//   sys 18..20 opendir/readdir/closedir
+// Creates build/flint_fs_tmp/, exercises it, removes it again.
+//
+// Run from the project root: flint run tests/fsops.flt -> "fs: ok"
+
+include "stdlib.flt"
+include "string.flt"
+
+data:
+dir:     str "build/flint_fs_tmp", 0
+f1:      str "build/flint_fs_tmp/a.txt", 0
+f2:      str "build/flint_fs_tmp/b.txt", 0
+hello:   str "hello", 0
+world:   str " world", 0
+exp_w:   str "world", 0
+exp_tr:  str "alp", 0
+l_bname: str "b.txt", 0
+l_pass:  str "fs: ok", 10, 0
+l_fail:  str "fs: FAIL", 10, 0
+buf:     bytes 32
+w_found: int 0
+
+code:
+main:
+    // clean leftovers from a previous failed run (results ignored)
+    set r0, f1
+    sys 9
+    set r0, f2
+    sys 9
+    set r0, dir
+    sys 17
+
+    // mkdir
+    set r0, dir
+    set r1, 493                 // 0755
+    sys 8
+    jump.ne r0, 0, .fail
+
+    // "hello" via write mode, then " world" via append mode
+    set r0, f1
+    set r1, 1
+    sys 3
+    copy r4, r0
+    jump.lt r4, 0, .fail
+    copy r0, r4
+    set r1, hello
+    set r2, 5
+    sys 5                       // write -> 5
+    jump.ne r0, 5, .fail
+    copy r0, r4
+    sys 6
+    jump.ne r0, 0, .fail
+
+    set r0, f1
+    set r1, 2
+    sys 3                       // append
+    copy r4, r0
+    jump.lt r4, 0, .fail
+    copy r0, r4
+    set r1, world
+    set r2, 6
+    sys 5                       // append -> 6
+    jump.ne r0, 6, .fail
+    copy r0, r4
+    sys 6
+    jump.ne r0, 0, .fail
+
+    // lseek to offset 6, read "world"
+    set r0, f1
+    set r1, 0
+    sys 3
+    copy r4, r0
+    jump.lt r4, 0, .fail
+    copy r0, r4
+    set r1, 6
+    set r2, 0                   // SEEK_SET
+    sys 15
+    jump.ne r0, 6, .fail
+    copy r0, r4
+    set r1, buf
+    set r2, 5
+    sys 4                       // read -> 5
+    jump.ne r0, 5, .fail
+    copy r0, r4
+    sys 6
+    jump.ne r0, 0, .fail
+    set r5, buf
+    set r7, 0
+    store.byte [r5+5], r7       // NUL-terminate the 5 read bytes
+    set r1, buf
+    set r2, exp_w
+    call s_strcmp
+    jump.ne r0, .fail
+
+    // rename a.txt -> b.txt; a must be gone, b must exist
+    set r0, f1
+    set r1, f2
+    sys 16
+    jump.ne r0, 0, .fail
+    set r0, f2
+    set r1, buf
+    sys 7
+    jump.ne r0, 0, .fail
+    set r0, f1
+    set r1, buf
+    sys 7
+    jump.ne r0, -1, .fail
+
+    // readdir: b.txt must appear
+    set r0, dir
+    sys 18
+    copy r4, r0
+    jump.lt r4, 0, .fail
+    set r6, 0                   // guard counter
+.rd_loop:
+    copy r0, r4
+    set r1, buf
+    set r2, 32
+    sys 19
+    jump.eq r0, .rd_done        // end of directory
+    jump.lt r0, 0, .fail
+    set r7, 64
+    jump.ge r6, r7, .fail       // runaway guard
+    inc r6
+    // byte-compare buf with "b.txt"
+    set r5, buf
+    set r7, l_bname
+.rd_cmp:
+    load.byte r0, [r7+0]
+    jump.eq r0, .rd_lit_end
+    load.byte r1, [r5+0]
+    jump.ne r0, r1, .rd_next
+    inc r5
+    inc r7
+    jump .rd_cmp
+.rd_lit_end:
+    load.byte r1, [r5+0]
+    jump.ne r1, .rd_next        // name continues: not equal
+    set r7, 1
+    set r5, w_found
+    store [r5], r7
+.rd_next:
+    jump .rd_loop
+.rd_done:
+    copy r0, r4
+    sys 20
+    jump.ne r0, 0, .fail
+    set r5, w_found
+    load r5, [r5]
+    jump.eq r5, .fail           // b.txt was not listed
+
+    // cleanup: unlink b.txt, rmdir the directory
+    set r0, f2
+    sys 9
+    jump.ne r0, 0, .fail
+    set r0, dir
+    sys 17
+    jump.ne r0, 0, .fail
+    set r1, l_pass
+    call s_print
+    set r0, 0
+    exit
+.fail:
+    set r1, l_fail
+    call s_print
+    set r0, 1
+    exit

@@ -122,6 +122,12 @@ with the GC flags; the exit code is 0 when every thread finished with
 can call `flint_run_parallel(filename, num_threads, stack_size)`
 directly.
 
+Arguments after the file or project (`flint run prog.flt a b`) are
+program arguments: `sys 12` returns the count, `sys 13` copies one into
+a buffer, `sys 14` looks up an environment variable. `--threads` runs
+take no program arguments; standalone ELFs (`flint build --elf`) expose
+their own process arguments the same way.
+
 CLI exit codes:
 
 | Code | Meaning                                            |
@@ -362,13 +368,22 @@ definition time); an error inside a body reports the invocation line.
 
 ```
 lib/stdlib.flt  print/strlen/memcpy/memset/itoa/num (CLI syscalls)
-lib/string.flt  strcpy/strcat/strcmp/upper/lower
+lib/string.flt  strcpy/strcat/strcmp/upper/lower + atoi/find/chr/
+                starts_with/ends_with/trim/reverse
+lib/math.flt    abs/min/max/clamp/gcd/lcm/isqrt/pow/lcg/hash64 (integer)
 lib/crc32.flt   CRC-32/ISO-HDLC; one-shot + streaming, no allocation
 lib/crc32c.flt  CRC-32C / Castagnoli; one-shot + streaming, no allocation
 lib/sha256.flt  SHA-256 (FIPS 180-4); s_sha256(data, len, out) -> out
 lib/base64.flt  RFC 4648 encode/decode; caller buffers, no static scratch
 lib/progress.flt minimal tqdm-style progress bar: \r[####....] pct% + rough ETA
 ```
+
+`math.flt` exposes integer helpers: `s_abs`, `s_min`, `s_max`,
+`s_clamp`, `s_gcd`, `s_lcm`, `s_isqrt` (floor square root), `s_pow`
+(exponentiation by squaring), `s_lcg` (one 64-bit LCG step — feed the
+state back in for a PRNG) and `s_hash64` (splitmix64 finalizer for
+stateless hashing). Arithmetic wraps on overflow; `s_isqrt` returns 0
+for negatives and `s_pow` returns 0 for a negative exponent.
 
 `crc32.flt` exposes `s_crc32(r1 = data, r2 = len)` for a complete
 checksum, and `s_crc32_update(r1 = crc, r2 = data, r3 = len)` for
@@ -591,7 +606,7 @@ image bounds. File results are POSIX descriptors; failures return −1.
 | 0    | print_str | r1 = addr, r2 = len | writes r2 raw bytes (NULs included); clobbers no register |
 | 1    | putc      | r0 = character | print the low byte            |
 | 2    | getc      | —             | r0 = character or −1 (EOF)     |
-| 3    | open      | r0 = NUL-terminated path in `mem`, r1 = flags (0 read / 1 write) | r0 = fd or −1 |
+| 3    | open      | r0 = NUL-terminated path in `mem`, r1 = flags (0 read / 1 write / 2 append) | r0 = fd or −1 |
 | 4    | read      | r0 = fd, r1 = buffer in `mem`, r2 = max bytes | r0 = bytes read (0 on EOF) or −1 |
 | 5    | write     | r0 = fd, r1 = buffer in `mem`, r2 = bytes | r0 = bytes written or −1 |
 | 6    | close     | r0 = fd       | r0 = 0 or −1                   |
@@ -600,12 +615,22 @@ image bounds. File results are POSIX descriptors; failures return −1.
 | 9    | unlink    | r0 = NUL-terminated path in `mem` | r0 = 0 or −1 |
 | 10   | time      | —             | r0 = UNIX epoch seconds        |
 | 11   | regs      | —             | debug: print r0..r15, one per line (not part of the stable ABI) |
+| 12   | argc      | —             | r0 = number of program arguments |
+| 13   | getarg    | r0 = index, r1 = buffer in `mem`, r2 = capacity | r0 = full length or −1; the argument is copied NUL-terminated (truncated to r2−1 bytes) |
+| 14   | getenv    | r0 = NUL-terminated name in `mem`, r1 = buffer in `mem`, r2 = capacity | r0 = full length or −1 (unset) |
+| 15   | lseek     | r0 = fd, r1 = offset, r2 = whence (0 set / 1 current / 2 end) | r0 = new offset or −1 |
+| 16   | rename    | r0 = old path in `mem`, r1 = new path in `mem` | r0 = 0 or −1 |
+| 17   | rmdir     | r0 = NUL-terminated path in `mem` | r0 = 0 or −1 |
+| 18   | opendir   | r0 = NUL-terminated path in `mem` | r0 = handle ≥ 0 or −1 |
+| 19   | readdir   | r0 = handle, r1 = buffer in `mem`, r2 = capacity | r0 = name length (`.`, `..` included), 0 = end of directory, −1 = error |
+| 20   | closedir  | r0 = handle   | r0 = 0 or −1                   |
 
-`open` flags: `0` = read-only; `1` = write, creating/truncating the file.
-Slots 0..6 are the standard set (`FLINT_SYS_*` in `flint.h`); 7..11 are the
-CLI extensions (7..9 file metadata — stat/mkdir/unlink — and 10..11
-time/debug). Slots 12..63 stay free for embedding hosts. Calling an
-unfilled slot is a predictable `NOSYS` trap.
+`open` flags: `0` = read-only; `1` = write, creating/truncating; `2` =
+append, creating the file when missing. Slots 0..6 are the standard set
+(`FLINT_SYS_*` in `flint.h`); 7..20 are the CLI extensions (7..9 file
+metadata, 10..11 time/debug, 12..14 args/env, 15..20 files/dirs). Slots
+21..63 stay free for embedding hosts. Calling an unfilled slot is a
+predictable `NOSYS` trap.
 
 Common recipes:
 
@@ -616,6 +641,9 @@ sys 2           // manual stdin reading, one character at a time
 sys 11          // debug: dump registers mid-run
 sys 3/4/5/6     // file round-trip: open(path) -> read/write(buf, n) -> close
 sys 7/8/9       // file metadata: stat(path, buf) / mkdir(path, mode) / unlink(path)
+sys 12/13/14    // argc / getarg(index, buf, cap) / getenv(name, buf, cap)
+sys 15/16/17    // lseek(fd, off, whence) / rename(old, new) / rmdir(path)
+sys 18/19/20    // opendir(path) / readdir(handle, buf, cap) / closedir(handle)
 ```
 
 ---

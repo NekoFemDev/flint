@@ -1,0 +1,329 @@
+// math — every lib/math.flt helper: abs / min / max / clamp / gcd /
+// lcm / isqrt / pow / lcg / hash64.
+// One "<name>:ok" line per check; the last line is "math: ok"
+// (or "math: FAIL" with a non-zero exit code).
+//
+// Run: flint run tests/math_test.flt
+
+include "stdlib.flt"
+include "math.flt"
+
+data:
+s_ok:    str "ok", 0
+s_bad:   str "bad", 0
+l_pass:  str "math: ok", 10, 0
+l_fail:  str "math: FAIL", 10, 0
+
+l_abs_n:  str "abs-neg:", 0
+l_abs_p:  str "abs-pos:", 0
+l_min:    str "min:", 0
+l_max:    str "max:", 0
+l_cl3:    str "clamp-hi:", 0
+l_cl1:    str "clamp-lo:", 0
+l_cl2:    str "clamp-mid:", 0
+l_gcd:    str "gcd:", 0
+l_gcd_n:  str "gcd-neg:", 0
+l_gcd0:   str "gcd-zero:", 0
+l_lcm:    str "lcm:", 0
+l_lcm0:   str "lcm-zero:", 0
+l_lcm_n:  str "lcm-neg:", 0
+l_isq0:   str "isqrt-0:", 0
+l_isq1:   str "isqrt-1:", 0
+l_isq15:  str "isqrt-15:", 0
+l_isq16:  str "isqrt-16:", 0
+l_isq_big: str "isqrt-big:", 0
+l_pow:    str "pow:", 0
+l_pow0:   str "pow-exp0:", 0
+l_pow00:  str "pow-0-0:", 0
+l_pow_n:  str "pow-neg:", 0
+l_lcg_eq: str "lcg-det:", 0
+l_lcg_ne: str "lcg-next:", 0
+l_h_eq:   str "hash-det:", 0
+l_h_nz:   str "hash-nz:", 0
+l_h_ne:   str "hash-diff:", 0
+
+w_fails:  int 0
+
+code:
+main:
+    // s_abs
+    set r1, -5
+    call s_abs
+    copy r2, r0
+    set r1, l_abs_n
+    set r3, 5
+    call expect
+    set r1, 7
+    call s_abs
+    copy r2, r0
+    set r1, l_abs_p
+    set r3, 7
+    call expect
+
+    // s_min / s_max
+    set r1, 3
+    set r2, -2
+    call s_min
+    copy r2, r0
+    set r1, l_min
+    set r3, -2
+    call expect
+    set r1, 3
+    set r2, -2
+    call s_max
+    copy r2, r0
+    set r1, l_max
+    set r3, 3
+    call expect
+
+    // s_clamp into [1, 3]
+    set r1, 5
+    set r2, 1
+    set r3, 3
+    call s_clamp
+    copy r2, r0
+    set r1, l_cl3
+    set r3, 3
+    call expect
+    set r1, 0
+    set r2, 1
+    set r3, 3
+    call s_clamp
+    copy r2, r0
+    set r1, l_cl1
+    set r3, 1
+    call expect
+    set r1, 2
+    set r2, 1
+    set r3, 3
+    call s_clamp
+    copy r2, r0
+    set r1, l_cl2
+    set r3, 2
+    call expect
+
+    // s_gcd
+    set r1, 48
+    set r2, 18
+    call s_gcd
+    copy r2, r0
+    set r1, l_gcd
+    set r3, 6
+    call expect
+    set r1, -12
+    set r2, 18
+    call s_gcd
+    copy r2, r0
+    set r1, l_gcd_n
+    set r3, 6
+    call expect
+    set r1, 0
+    set r2, 0
+    call s_gcd
+    copy r2, r0
+    set r1, l_gcd0
+    set r3, 0
+    call expect
+
+    // s_lcm
+    set r1, 4
+    set r2, 6
+    call s_lcm
+    copy r2, r0
+    set r1, l_lcm
+    set r3, 12
+    call expect
+    set r1, 0
+    set r2, 5
+    call s_lcm
+    copy r2, r0
+    set r1, l_lcm0
+    set r3, 0
+    call expect
+    set r1, -4
+    set r2, 6
+    call s_lcm
+    copy r2, r0
+    set r1, l_lcm_n
+    set r3, 12
+    call expect
+
+    // s_isqrt
+    set r1, 0
+    call s_isqrt
+    copy r2, r0
+    set r1, l_isq0
+    set r3, 0
+    call expect
+    set r1, 1
+    call s_isqrt
+    copy r2, r0
+    set r1, l_isq1
+    set r3, 1
+    call expect
+    set r1, 15
+    call s_isqrt
+    copy r2, r0
+    set r1, l_isq15
+    set r3, 3
+    call expect
+    set r1, 16
+    call s_isqrt
+    copy r2, r0
+    set r1, l_isq16
+    set r3, 4
+    call expect
+    set r1, 1
+    shl r1, r1, 62              // 2^62 -> root 2^31
+    call s_isqrt
+    copy r2, r0
+    set r3, 1
+    shl r3, r3, 31
+    set r1, l_isq_big
+    call expect
+
+    // s_pow
+    set r1, 2
+    set r2, 10
+    call s_pow
+    copy r2, r0
+    set r1, l_pow
+    set r3, 1024
+    call expect
+    set r1, 3
+    set r2, 0
+    call s_pow
+    copy r2, r0
+    set r1, l_pow0
+    set r3, 1
+    call expect
+    set r1, 0
+    set r2, 0
+    call s_pow
+    copy r2, r0
+    set r1, l_pow00
+    set r3, 1
+    call expect
+    set r1, 5
+    set r2, -1
+    call s_pow
+    copy r2, r0
+    set r1, l_pow_n
+    set r3, 0
+    call expect
+
+    // s_lcg: deterministic, and the state actually moves
+    set r1, 7
+    call s_lcg
+    copy r6, r0
+    set r1, 7
+    call s_lcg
+    copy r2, r6
+    copy r3, r0
+    set r1, l_lcg_eq
+    call expect
+    copy r1, r6
+    call s_lcg
+    copy r2, r0
+    copy r3, r6
+    set r1, l_lcg_ne
+    call expect_diff
+
+    // s_hash64: deterministic, non-zero for 1, different for 2
+    set r1, 1
+    call s_hash64
+    copy r6, r0
+    set r1, 1
+    call s_hash64
+    copy r2, r6
+    copy r3, r0
+    set r1, l_h_eq
+    call expect
+    set r1, 1
+    call s_hash64
+    copy r2, r0
+    set r3, 0
+    set r1, l_h_nz
+    call expect_diff
+    set r1, 1
+    call s_hash64
+    copy r6, r0
+    set r1, 2
+    call s_hash64
+    copy r2, r6
+    copy r3, r0
+    set r1, l_h_ne
+    call expect_diff
+
+    // summary: every check above must have passed
+    set r1, w_fails
+    load r1, [r1]
+    jump.ne r1, .t_fail
+    set r1, l_pass
+    call s_print
+    set r0, 0
+    exit
+.t_fail:
+    set r1, l_fail
+    call s_print
+    set r0, 1
+    exit
+
+// expect(r1 = label, r2 = actual, r3 = expected) -> "<label>ok\n" or
+// "<label>bad\n"; a mismatch bumps w_fails.
+expect:
+    enter 32
+    store [fp-8], r1
+    store [fp-16], r2
+    store [fp-24], r3
+    load r1, [fp-8]
+    call s_print
+    load r2, [fp-16]
+    load r3, [fp-24]
+    jump.eq r2, r3, .ex_ok
+    set r1, w_fails
+    load r2, [r1]
+    inc r2
+    store [r1], r2
+    set r1, s_bad
+    call s_print
+    jump .ex_nl
+.ex_ok:
+    set r1, s_ok
+    call s_print
+.ex_nl:
+    call nl
+    leave
+    return
+
+// expect_diff(r1 = label, r2, r3) -> ok when r2 != r3
+expect_diff:
+    enter 32
+    store [fp-8], r1
+    store [fp-16], r2
+    store [fp-24], r3
+    load r1, [fp-8]
+    call s_print
+    load r2, [fp-16]
+    load r3, [fp-24]
+    jump.ne r2, r3, .ed_ok
+    set r1, w_fails
+    load r2, [r1]
+    inc r2
+    store [r1], r2
+    set r1, s_bad
+    call s_print
+    jump .ed_nl
+.ed_ok:
+    set r1, s_ok
+    call s_print
+.ed_nl:
+    call nl
+    leave
+    return
+
+nl:
+    set r0, 10
+    sys 1
+    set r0, 0
+    return
