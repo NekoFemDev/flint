@@ -1,0 +1,330 @@
+// base64 — RFC 4648 encoder/decoder (standard alphabet, '=' padding).
+//
+// Usage:   include "base64.flt"
+// ABI:     args r1..r3, result r0; clobbers r0..r11; r12..r15 preserved.
+//          No allocation and no static scratch (only the read-only
+//          alphabet), so the library is reentrant and safe under
+//          host-level threads.
+//
+// s_b64_encode(r1 = src, r2 = len, r3 = dst) -> r0 = chars written
+//     Encodes len bytes; no line wrapping; '=' padding. dst needs
+//     s_b64_encoded_len(len) bytes; the output is not NUL-terminated.
+//
+// s_b64_decode(r1 = src, r2 = len, r3 = dst) -> r0 = bytes written or -1
+//     Decodes standard base64. Skips ' ', '\t', '\r', '\n'. Accepts
+//     '='-padded input and unpadded final groups of 2 or 3 chars.
+//     Returns -1 on an invalid character, a stray '=', a lone trailing
+//     char, or data after padding; bytes written before an error stay
+//     in dst. Pad bits are not validated (lenient).
+//
+// s_b64_encoded_len(r1 = len) -> r0 = 4 * ceil(len / 3)
+// ===========================================================================
+
+data:
+b64_alpha: str "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+code:
+
+// ===========================================================================
+// internal helpers — clobber only the registers named in their comments
+// ===========================================================================
+
+// r0 = 6-bit value of a base64 char, or -1 (r1 = char; clobbers r2)
+b64_val:
+    set r2, 65
+    jump.lt r1, r2, .v_lo
+    set r2, 91
+    jump.lt r1, r2, .v_up       // 'A'..'Z'
+    set r2, 97
+    jump.lt r1, r2, .v_bad      // 91..96
+    set r2, 123
+    jump.lt r1, r2, .v_low      // 'a'..'z'
+    jump .v_bad
+.v_lo:
+    set r2, 48
+    jump.lt r1, r2, .v_lo2      // < '0'
+    set r2, 58
+    jump.lt r1, r2, .v_dig      // '0'..'9'
+.v_lo2:
+    set r2, 43
+    jump.eq r1, r2, .v_plus     // '+'
+    set r2, 47
+    jump.eq r1, r2, .v_slash    // '/'
+    jump .v_bad
+.v_up:
+    set r2, 65
+    sub r0, r1, r2
+    return
+.v_low:
+    set r2, 71
+    sub r0, r1, r2
+    return
+.v_dig:
+    add r0, r1, 4
+    return
+.v_plus:
+    set r0, 62
+    return
+.v_slash:
+    set r0, 63
+    return
+.v_bad:
+    set r0, -1
+    return
+
+// r0 = next non-whitespace byte, or -1 if exhausted; r1 advanced past it
+// (r1 = cursor, r2 = end; clobbers r0, r1, r3)
+b64_next:
+.nx:
+    jump.hs r1, r2, .nx_eof
+    load.byte r0, [r1+0]
+    inc r1
+    set r3, 32                  // ' '
+    jump.eq r0, r3, .nx
+    set r3, 9                   // '\t'
+    jump.eq r0, r3, .nx
+    set r3, 13                  // '\r'
+    jump.eq r0, r3, .nx
+    set r3, 10                  // '\n'
+    jump.eq r0, r3, .nx
+    return
+.nx_eof:
+    set r0, -1
+    return
+
+// ===========================================================================
+// s_b64_encoded_len(r1 = len) -> r0 = 4 * ceil(len / 3)
+// ===========================================================================
+s_b64_encoded_len:
+    add r0, r1, 2
+    set r2, 3
+    div r0, r0, r2
+    shl r0, r0, 2
+    return
+
+// ===========================================================================
+// s_b64_encode(r1 = src, r2 = len, r3 = dst) -> r0 = chars written
+// ===========================================================================
+s_b64_encode:
+    copy r4, r1                 // src cursor
+    copy r5, r2                 // bytes remaining
+    copy r6, r3                 // dst cursor
+    copy r10, r3                // dst base (for the length)
+    set r9, b64_alpha
+.enc_loop:
+    set r7, 3
+    jump.lt r5, r7, .enc_tail
+    // full 3-byte group -> 4 chars
+    load.byte r1, [r4+0]
+    load.byte r2, [r4+1]
+    load.byte r3, [r4+2]
+    // c0 = b0 >> 2
+    shr r7, r1, 2
+    add r8, r9, r7
+    load.byte r7, [r8+0]
+    store.byte [r6+0], r7
+    // c1 = ((b0 & 3) << 4) | (b1 >> 4)
+    and r7, r1, 3
+    shl r7, r7, 4
+    shr r8, r2, 4
+    or r7, r7, r8
+    add r8, r9, r7
+    load.byte r7, [r8+0]
+    store.byte [r6+1], r7
+    // c2 = ((b1 & 15) << 2) | (b2 >> 6)
+    and r7, r2, 15
+    shl r7, r7, 2
+    shr r8, r3, 6
+    or r7, r7, r8
+    add r8, r9, r7
+    load.byte r7, [r8+0]
+    store.byte [r6+2], r7
+    // c3 = b2 & 63
+    and r7, r3, 63
+    add r8, r9, r7
+    load.byte r7, [r8+0]
+    store.byte [r6+3], r7
+    add r4, r4, 3
+    sub r5, r5, 3
+    add r6, r6, 4
+    jump .enc_loop
+.enc_tail:
+    jump.eq r5, .enc_done
+    set r7, 2
+    jump.eq r5, r7, .enc_two
+    // one byte left -> 2 chars + "=="
+    load.byte r1, [r4+0]
+    shr r7, r1, 2
+    add r8, r9, r7
+    load.byte r7, [r8+0]
+    store.byte [r6+0], r7
+    and r7, r1, 3
+    shl r7, r7, 4
+    add r8, r9, r7
+    load.byte r7, [r8+0]
+    store.byte [r6+1], r7
+    set r7, 61                  // '='
+    store.byte [r6+2], r7
+    store.byte [r6+3], r7
+    add r6, r6, 4
+    jump .enc_done
+.enc_two:
+    // two bytes left -> 3 chars + "="
+    load.byte r1, [r4+0]
+    load.byte r2, [r4+1]
+    shr r7, r1, 2
+    add r8, r9, r7
+    load.byte r7, [r8+0]
+    store.byte [r6+0], r7
+    and r7, r1, 3
+    shl r7, r7, 4
+    shr r8, r2, 4
+    or r7, r7, r8
+    add r8, r9, r7
+    load.byte r7, [r8+0]
+    store.byte [r6+1], r7
+    and r7, r2, 15
+    shl r7, r7, 2
+    add r8, r9, r7
+    load.byte r7, [r8+0]
+    store.byte [r6+2], r7
+    set r7, 61
+    store.byte [r6+3], r7
+    add r6, r6, 4
+.enc_done:
+    sub r0, r6, r10
+    return
+
+// ===========================================================================
+// s_b64_decode(r1 = src, r2 = len, r3 = dst) -> r0 = bytes written or -1
+// ===========================================================================
+// registers: r4 cursor, r5 end, r6 dst cursor, r10 dst base,
+//            r7..r9 + r11 = the four 6-bit values of the current group
+s_b64_decode:
+    copy r4, r1
+    add r5, r1, r2              // end = src + len
+    copy r6, r3
+    copy r10, r3
+.d_loop:
+    copy r1, r4
+    copy r2, r5
+    call b64_next
+    copy r4, r1
+    jump.lt r0, 0, .d_done      // clean end at a group boundary
+    copy r1, r0
+    call b64_val
+    jump.lt r0, 0, .d_bad       // invalid char (or misplaced '=')
+    copy r7, r0                 // v0
+    // c1
+    copy r1, r4
+    copy r2, r5
+    call b64_next
+    copy r4, r1
+    jump.lt r0, 0, .d_bad       // a lone trailing char is invalid
+    copy r1, r0
+    call b64_val
+    jump.lt r0, 0, .d_bad       // '=' here can never be valid
+    copy r8, r0                 // v1
+    // c2: '=' -> "xx==" tail; end of input -> unpadded tail (2 chars)
+    copy r1, r4
+    copy r2, r5
+    call b64_next
+    copy r4, r1
+    jump.lt r0, 0, .d_two
+    set r2, 61
+    jump.eq r0, r2, .d_pad1
+    copy r1, r0
+    call b64_val
+    jump.lt r0, 0, .d_bad
+    copy r9, r0                 // v2
+    // c3: '=' -> "xxx=" tail; end of input -> unpadded tail (3 chars)
+    copy r1, r4
+    copy r2, r5
+    call b64_next
+    copy r4, r1
+    jump.lt r0, 0, .d_three
+    set r2, 61
+    jump.eq r0, r2, .d_pad2
+    copy r1, r0
+    call b64_val
+    jump.lt r0, 0, .d_bad
+    copy r11, r0                // v3
+    // full group: 3 bytes
+    shl r0, r7, 2
+    shr r1, r8, 4
+    or r0, r0, r1
+    store.byte [r6+0], r0
+    and r0, r8, 15
+    shl r0, r0, 4
+    shr r1, r9, 2
+    or r0, r0, r1
+    store.byte [r6+1], r0
+    and r0, r9, 3
+    shl r0, r0, 6
+    or r0, r0, r11
+    store.byte [r6+2], r0
+    add r6, r6, 3
+    jump .d_loop
+
+.d_two:                         // last group: 2 chars -> 1 byte
+    shl r0, r7, 2
+    shr r1, r8, 4
+    or r0, r0, r1
+    store.byte [r6+0], r0
+    inc r6
+    jump .d_done
+
+.d_three:                       // last group: 3 chars -> 2 bytes
+    shl r0, r7, 2
+    shr r1, r8, 4
+    or r0, r0, r1
+    store.byte [r6+0], r0
+    and r0, r8, 15
+    shl r0, r0, 4
+    shr r1, r9, 2
+    or r0, r0, r1
+    store.byte [r6+1], r0
+    add r6, r6, 2
+    jump .d_done
+
+.d_pad1:                        // "xx==": require the second '=', then end
+    copy r1, r4
+    copy r2, r5
+    call b64_next
+    copy r4, r1
+    set r2, 61
+    jump.ne r0, r2, .d_bad
+    copy r1, r4
+    copy r2, r5
+    call b64_next
+    jump.ge r0, 0, .d_bad       // only whitespace may follow padding
+    shl r0, r7, 2
+    shr r1, r8, 4
+    or r0, r0, r1
+    store.byte [r6+0], r0
+    inc r6
+    jump .d_done
+
+.d_pad2:                        // "xxx=": only whitespace may follow
+    copy r1, r4
+    copy r2, r5
+    call b64_next
+    jump.ge r0, 0, .d_bad
+    shl r0, r7, 2
+    shr r1, r8, 4
+    or r0, r0, r1
+    store.byte [r6+0], r0
+    and r0, r8, 15
+    shl r0, r0, 4
+    shr r1, r9, 2
+    or r0, r0, r1
+    store.byte [r6+1], r0
+    add r6, r6, 2
+    jump .d_done
+
+.d_bad:
+    set r0, -1
+    return
+.d_done:
+    sub r0, r6, r10
+    return

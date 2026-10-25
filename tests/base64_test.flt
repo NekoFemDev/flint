@@ -1,0 +1,219 @@
+// base64 — RFC 4648 vectors, whitespace handling, error cases, round-trip.
+//
+// Expected output:
+//   f:Zg==            fo:Zm8=           foo:Zm9v
+//   foob:Zm9vYg==     fooba:Zm9vYmE=    foobar:Zm9vYmFy
+//   dec:foobar        ws:foobar
+//   bad1:err          bad2:err          bad3:err          bad4:err
+//   rt:ok
+
+include "stdlib.flt"
+include "base64.flt"
+
+data:
+m_f:        str "f"
+m_fo:       str "fo"
+m_foo:      str "foo"
+m_foob:     str "foob"
+m_fooba:    str "fooba"
+m_foobar:   str "foobar"
+b64_foobar: str "Zm9vYmFy"
+b64_f:      str "Zg=="
+b64_fo:     str "Zm8="
+b64_unpad2: str "Zm9vYg"
+b64_unpad3: str "Zm9vYmE"
+ws_in:      str "Zm9v\nYmFy"
+bad1:       str "Zm9!"
+bad2:       str "Zg="
+bad3:       str "Z"
+bad4:       str "Zg==Zg=="
+l_f:        str "f:", 0
+l_fo:       str "fo:", 0
+l_foo:      str "foo:", 0
+l_foob:     str "foob:", 0
+l_fooba:    str "fooba:", 0
+l_foobar:   str "foobar:", 0
+l_dec:      str "dec:", 0
+l_d1:       str "d1:", 0
+l_d2:       str "d2:", 0
+l_up2:      str "up2:", 0
+l_up3:      str "up3:", 0
+l_ws:       str "ws:", 0
+l_b1:       str "bad1:", 0
+l_b2:       str "bad2:", 0
+l_b3:       str "bad3:", 0
+l_b4:       str "bad4:", 0
+s_err:      str "err", 0
+l_rtok:     str "rt:ok", 0
+l_rtbad:    str "rt:FAIL", 0
+enc:        bytes 416
+dec:        bytes 320
+src:        bytes 300
+
+code:
+main:
+    // RFC 4648 test vectors
+    set r1, l_f
+    set r2, m_f
+    set r3, 1
+    call show_enc
+    set r1, l_fo
+    set r2, m_fo
+    set r3, 2
+    call show_enc
+    set r1, l_foo
+    set r2, m_foo
+    set r3, 3
+    call show_enc
+    set r1, l_foob
+    set r2, m_foob
+    set r3, 4
+    call show_enc
+    set r1, l_fooba
+    set r2, m_fooba
+    set r3, 5
+    call show_enc
+    set r1, l_foobar
+    set r2, m_foobar
+    set r3, 6
+    call show_enc
+
+    // decode, including embedded whitespace
+    set r1, l_dec
+    set r2, b64_foobar
+    set r3, 8
+    call show_dec
+    set r1, l_d1
+    set r2, b64_f
+    set r3, 4
+    call show_dec
+    set r1, l_d2
+    set r2, b64_fo
+    set r3, 4
+    call show_dec
+    set r1, l_up2
+    set r2, b64_unpad2
+    set r3, 6
+    call show_dec
+    set r1, l_up3
+    set r2, b64_unpad3
+    set r3, 7
+    call show_dec
+    set r1, l_ws
+    set r2, ws_in
+    set r3, 9
+    call show_dec
+
+    // invalid inputs must return -1
+    set r1, l_b1
+    set r2, bad1
+    set r3, 4
+    call show_dec
+    set r1, l_b2
+    set r2, bad2
+    set r3, 3
+    call show_dec
+    set r1, l_b3
+    set r2, bad3
+    set r3, 1
+    call show_dec
+    set r1, l_b4
+    set r2, bad4
+    set r3, 8
+    call show_dec
+
+    // round-trip: 300 patterned bytes
+    set r4, src
+    set r5, 0
+    set r6, 300
+.rt_fill:
+    store.byte [r4+0], r5
+    add r5, r5, 7
+    and r5, r5, 255
+    inc r4
+    dec r6
+    jump.ne r6, .rt_fill
+
+    set r1, src
+    set r2, 300
+    set r3, enc
+    call s_b64_encode
+    set r1, enc
+    copy r2, r0
+    set r3, dec
+    call s_b64_decode
+    set r7, 300
+    jump.ne r0, r7, .rt_bad
+
+    set r4, src
+    set r5, dec
+    set r6, 300
+.rt_cmp:
+    load.byte r7, [r4+0]
+    load.byte r8, [r5+0]
+    jump.ne r7, r8, .rt_bad
+    inc r4
+    inc r5
+    dec r6
+    jump.ne r6, .rt_cmp
+    set r1, l_rtok
+    call s_print
+    call newline
+    jump .rt_done
+.rt_bad:
+    set r1, l_rtbad
+    call s_print
+    call newline
+.rt_done:
+    set r0, 0
+    exit
+
+// show_enc(r1 = label, r2 = src, r3 = n) — print "<label><base64>\n"
+show_enc:
+    enter 32
+    store [fp-8], r1
+    store [fp-16], r2
+    store [fp-24], r3
+    load r1, [fp-8]
+    call s_print
+    load r1, [fp-16]
+    load r2, [fp-24]
+    set r3, enc
+    call s_b64_encode
+    set r1, enc
+    copy r2, r0
+    sys 0
+    call newline
+    leave
+    return
+
+// show_dec(r1 = label, r2 = src, r3 = n) — print "<label><bytes>" or "<label>err"
+show_dec:
+    enter 32
+    store [fp-8], r1
+    store [fp-16], r2
+    store [fp-24], r3
+    load r1, [fp-8]
+    call s_print
+    load r1, [fp-16]
+    load r2, [fp-24]
+    set r3, dec
+    call s_b64_decode
+    jump.ge r0, 0, .sd_ok
+    set r1, s_err
+    call s_print
+    jump .sd_out
+.sd_ok:
+    set r1, dec
+    copy r2, r0
+    sys 0
+.sd_out:
+    call newline
+    leave
+    return
+
+newline:
+    set r0, 10
+    sys 1
+    set r0, 0
+    return
