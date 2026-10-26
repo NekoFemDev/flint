@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0-pre.8 — 2026-10-26
+
+### Added
+
+- **Rust/Clang-style assembler diagnostics** (`src/flint_asm.c`,
+  `include/flint_ui.h`): the first error of an assembly pass is rendered
+  as a coloured block with the source line and a caret run —
+  `error: ...` (bold red), `--> file:line:col` (cyan), the line in a
+  width-matched gutter, and `^^^` under the column (bold red,
+  tab-aware). Snippets cap at 240 chars; colors go to an interactive
+  stderr only (`NO_COLOR` opts out). `include/flint_ui.h` is the shared
+  ANSI palette.
+- **Lexer column tracking**: `asmx` carries `col` alongside
+  `line`/`ipos`; every `token` records the 1-based `line`/`col` it
+  starts at; include and macro frames save/restore the column. Errors
+  inside a macro body still report the invocation site.
+- **`report_diag()` / `fail_tok()`**: `fail()` and `fail_at()` route
+  through the reporter; `fail_tok()` points at the offending token
+  (`parse_reg`, `parse_mem`, `m_sys`).
+
+### Changed
+
+- The compact error string returned by `flint_assemble()` /
+  `flint_assemble_ctx()` now includes the column
+  (`file:line:col: message`), and fixup diagnostics degrade to the
+  header-only block when the snippet's file has already been popped.
+
 ## 0.4.0-pre.7 — 2026-10-26
 
 ### Added
