@@ -10,7 +10,7 @@ TESTS     = build/test_core build/test_asm build/test_heap build/test_gc
 
 all: $(BIN) $(STUB)
 
-$(BIN): $(SRC) src/main.c src/flint_dis.c include/flint.h include/flint_cli.h include/flint_img.h include/flint_stub.h
+$(BIN): $(SRC) src/main.c src/flint_dis.c include/flint.h include/flint_cli.h include/flint_img.h include/flint_stub.h include/flint_ui.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -pthread $(SRC) src/flint_dis.c src/main.c -o $@
 
@@ -38,7 +38,8 @@ STUB_LDFLAGS ?= $(if $(filter libc.a,$(shell $(CC) -print-file-name=libc.a 2>/de
 
 $(STUB): src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
          src/flint_img.c src/flint_dis.c \
-         include/flint.h include/flint_cli.h include/flint_img.h include/flint_stub.h
+         include/flint.h include/flint_cli.h include/flint_img.h include/flint_stub.h \
+         include/flint_ui.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(STUB_LDFLAGS) -pthread -o $@ \
 	  src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \

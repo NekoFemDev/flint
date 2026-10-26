@@ -30,11 +30,24 @@
  * r12..r15 callee-saved. enter N / leave build the local frame; locals
  * are addressed as [fp-8], [fp-16], ... .
  */
+/* isatty()/fileno() are POSIX; glibc hides them under strict -std=c99
+ * without a feature-test macro (flint_cli.c does the same for realpath).
+ * The guard keeps a host-provided setting intact. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#  define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#if defined(_WIN32)
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
 #include "flint.h"
+#include "flint_ui.h"
 
 #define T_MAX 256
 
@@ -111,6 +124,7 @@ typedef struct {
     int type;
     int len;                    /* T_STR payload length; may embed NULs */
     flint_word num;
+    uint32_t line, col;         /* 1-based start of the token in its file */
     char s[T_MAX];
 } token;
 
@@ -146,6 +160,7 @@ typedef struct {
     int      saved_have;        /* lookahead deferred past the body:    */
     token    saved_tok;         /* the token that followed the invocation */
     uint32_t saved_line;        /* line to resume at once the body ends */
+    uint32_t saved_col;         /* column to resume at                  */
 } macroframe;
 
 typedef struct { token *t; uint32_t n, cap; } tokbuf;
@@ -154,7 +169,7 @@ typedef struct { token *t; uint32_t n, cap; } tokbuf;
 #define FLINX_MAX_INC 24
 
 typedef struct {
-    const char *saved_src; uint32_t saved_ipos, saved_line;
+    const char *saved_src; uint32_t saved_ipos, saved_line, saved_col;
     char *saved_name, *saved_dir;     /* strdup'd, owned by the assembler */
     int    saved_owned;               /* saved text: freed by the owner chain */
     int    saved_have; token saved_tok;
@@ -163,9 +178,10 @@ typedef struct {
 } incframe;
 
 typedef struct {
-    const char *src; uint32_t ipos, line;
+    const char *src; uint32_t ipos, line, col;
 
-    char *cur_name, *cur_dir;         /* strdup'd file name + directory */
+    const char *filename;             /* root source name (diagnostics)   */
+    char *cur_name, *cur_dir;         /* strdup'd file name + directory   */
     int    cur_owned;                 /* root text is not ours; includes are */
     incframe fr[FLINX_MAX_INC]; int fsp;
 
@@ -187,30 +203,154 @@ typedef struct {
     token ahead_v; int have_v;
 } asmx;
 
-static void fail_common(asmx *a, const char *file, uint32_t line,
-                        const char *fmt, va_list ap)
+/* ---- diagnostics (Rust/Clang style) ----
+ *
+ * The first error of a pass is rendered on stderr as a coloured block with
+ * the offending source line and a caret run, and the compact
+ * "file:line:col: message" text is kept in a->err for flint_assemble() /
+ * flint_assemble_ctx() callers. a->src must be the text (line, col) refers
+ * to; the snippet is skipped when the error is attributed to a file the
+ * lexer no longer holds (fixups from popped include frames).
+ */
+
+#define DIAG_SNIPPET_MAX 240
+
+/* decimal digit count of v (v == 0 -> 1): the snippet gutter width */
+static uint32_t diag_digits(uint32_t v)
 {
-    char buf[300];
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    snprintf(a->err, sizeof(a->err), "%s:%u: %s", file ? file : "<src>", line, buf);
+    uint32_t n = 1;
+    while (v >= 10) { v /= 10; n++; }
+    return n;
+}
+
+/* copy the 1-based source line out of text (EOL and trailing CR out);
+ * returns 1 when the line exists, 0 otherwise */
+static int diag_line(const char *text, uint32_t line, char *out, uint32_t cap)
+{
+    uint32_t cur = 1, n = 0;
+
+    if (!text || cap == 0) return 0;
+    while (*text && cur < line) {
+        if (*text == '\n') cur++;
+        text++;
+    }
+    if (cur != line || *text == 0) return 0;
+    while (*text && *text != '\n' && n + 1 < cap)
+        out[n++] = *text++;
+    while (n > 0 && out[n - 1] == '\r') n--;
+    out[n] = 0;
+    return 1;
+}
+
+/* spaces to print before the caret run so it starts under the 1-based
+ * column col: tabs advance to the next multiple of 8, as terminals do */
+static uint32_t diag_pad(const char *s, uint32_t col)
+{
+    uint32_t x = 1, i = 0;
+
+    while (i + 1 < col && s[i]) {
+        x = (s[i] == '\t') ? x + 8 - ((x - 1) % 8) : x + 1;
+        i++;
+    }
+    return x - 1;
+}
+
+/* ANSI only to an interactive stderr; NO_COLOR opts out (same policy as
+ * the CLI's status output) */
+static int diag_color(void)
+{
+    if (getenv("NO_COLOR") != 0) return 0;
+#if defined(_WIN32)
+    return _isatty(_fileno(stderr)) != 0;
+#else
+    return isatty(fileno(stderr)) != 0;
+#endif
+}
+
+/* render one diagnostic and record it; first error wins */
+static void diag_emit(asmx *a, const char *file, uint32_t line, uint32_t col,
+                      const char *msg)
+{
+    char snippet[DIAG_SNIPPET_MAX];
+    uint32_t w, i, pad;
+    int have, color;
+
+    if (!a || !msg || a->err[0]) return;
+
+    if (!file) file = a->filename ? a->filename : "<src>";
+    if (col == 0) col = 1;
+    w = diag_digits(line);
+
+    snprintf(a->err, sizeof(a->err), "%s:%u:%u: %s", file, line, col, msg);
+
+    color = diag_color();
+    fprintf(stderr, "%s%serror:%s %s\n",
+            color ? CLR_BOLD : "", color ? CLR_RED : "",
+            color ? CLR_RESET : "", msg);
+    fprintf(stderr, "%*s%s-->%s %s:%u:%u\n",
+            (int)w, "", color ? CLR_CYAN : "", color ? CLR_RESET : "",
+            file, line, col);
+
+    /* the snippet needs the text the position refers to */
+    have = a->src && a->cur_name && strcmp(file, a->cur_name) == 0 &&
+           diag_line(a->src, line, snippet, sizeof snippet);
+    if (!have) return;
+
+    pad = diag_pad(snippet, col);
+    fprintf(stderr, "%*s |\n", (int)w, "");
+    fprintf(stderr, "%*u | %s\n", (int)w, line, snippet);
+    fprintf(stderr, "%*s | ", (int)w, "");
+    for (i = 0; i < pad; i++) fputc(' ', stderr);
+    fprintf(stderr, "%s%s^^^%s\n",
+            color ? CLR_BOLD : "", color ? CLR_RED : "",
+            color ? CLR_RESET : "");
+}
+
+/* report the first error at (line, col): the parser's diagnostic entry */
+static void report_diag(asmx *a, uint32_t line, uint32_t col, const char *msg)
+{
+    diag_emit(a, a->cur_name, line, col, msg);
 }
 
 static void fail(asmx *a, const char *fmt, ...)
 {
+    char buf[300];
     va_list ap;
+
     if (a->err[0]) return;                      /* first error wins */
     va_start(ap, fmt);
-    fail_common(a, a->cur_name, a->line, fmt, ap);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    report_diag(a, a->line, a->col, buf);
 }
 
 static void fail_at(asmx *a, const char *file, uint32_t line, const char *fmt, ...)
 {
+    char buf[300];
     va_list ap;
+
     if (a->err[0]) return;
     va_start(ap, fmt);
-    fail_common(a, file, line, fmt, ap);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    diag_emit(a, file, line, 1, buf);
+}
+
+/* like fail(), but points at the offending token when its position is
+ * known. Inside a macro body the invocation site is reported instead:
+ * the token's own position lives in the definition file, which is not the
+ * text a->src holds during expansion. */
+static void fail_tok(asmx *a, const token *t, const char *fmt, ...)
+{
+    char buf[300];
+    va_list ap;
+
+    if (a->err[0]) return;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (a->msp > 0) report_diag(a, a->line, a->col, buf);
+    else            report_diag(a, t->line, t->col, buf);
 }
 
 static int is_idstart(int c)
@@ -235,6 +375,7 @@ static void next_tok(asmx *a, token *t)
         macroframe *f = &a->mf[a->msp - 1];
         if (f->pos < f->n) { *t = f->toks[f->pos++]; return; }
         a->line = f->saved_line;
+        a->col  = f->saved_col;
         if (f->saved_have) {                 /* deferred lookahead is next */
             *t = f->saved_tok;
             free(f->toks);
@@ -249,33 +390,47 @@ static void next_tok(asmx *a, token *t)
     t->type = T_EOL;
 
     for (;;) {
-        if (a->src[a->ipos] == 0) { t->type = T_EOF; return; }
+        if (a->src[a->ipos] == 0) {
+            t->type = T_EOF; t->line = a->line; t->col = a->col;
+            return;
+        }
         if (a->src[a->ipos] == '/' && a->src[a->ipos + 1] == '/') {
-            while (a->src[a->ipos] && a->src[a->ipos] != '\n') a->ipos++;
+            while (a->src[a->ipos] && a->src[a->ipos] != '\n') {
+                a->ipos++; a->col++;
+            }
             continue;
         }
         if (a->src[a->ipos] == ' ' || a->src[a->ipos] == '\t' ||
-            a->src[a->ipos] == '\r') { a->ipos++; continue; }
-        if (a->src[a->ipos] == '\n') { a->line++; a->ipos++; t->type = T_EOL; return; }
+            a->src[a->ipos] == '\r') { a->ipos++; a->col++; continue; }
+        if (a->src[a->ipos] == '\n') {
+            t->line = a->line; t->col = a->col;      /* position of the EOL */
+            a->line++; a->col = 1; a->ipos++;
+            t->type = T_EOL; return;
+        }
         break;
     }
 
+    t->line = a->line;                           /* the token starts here */
+    t->col  = a->col;
+
     /* '%': a %macro/%endmacro-style directive word, or %1..%N argument ref */
     if (a->src[a->ipos] == '%') {
-        a->ipos++;
+        a->ipos++; a->col++;
         if (is_dig(a->src[a->ipos])) {
             uint64_t v = 0;
             while (is_dig(a->src[a->ipos])) {
                 v = v * 10 + (uint64_t)(a->src[a->ipos] - '0');
-                a->ipos++;
+                a->ipos++; a->col++;
             }
             t->num = (flint_word)v; t->type = T_MARG; return;
         }
         if (is_idstart(a->src[a->ipos])) {
             int n = 0;
             t->s[n++] = '%';
-            while (is_id(a->src[a->ipos]) && n < T_MAX - 1)
+            while (is_id(a->src[a->ipos]) && n < T_MAX - 1) {
                 t->s[n++] = a->src[a->ipos++];
+                a->col++;
+            }
             t->s[n] = 0; t->type = T_IDENT; return;
         }
         fail(a, "stray '%%'");
@@ -284,39 +439,41 @@ static void next_tok(asmx *a, token *t)
 
     if (is_idstart(a->src[a->ipos])) {
         int n = 0;
-        while (is_id(a->src[a->ipos]) && n < T_MAX - 1)
+        while (is_id(a->src[a->ipos]) && n < T_MAX - 1) {
             t->s[n++] = a->src[a->ipos++];
+            a->col++;
+        }
         t->s[n] = 0; t->type = T_IDENT; return;
     }
     if (a->src[a->ipos] == '"') {
         int n = 0;
-        a->ipos++;
+        a->ipos++; a->col++;
         while (a->src[a->ipos] && a->src[a->ipos] != '"') {
             char c = a->src[a->ipos];
             if (n >= T_MAX - 1) { fail(a, "string too long"); return; }
             if (c == '\\' && a->src[a->ipos + 1]) {
                 int e = esc(a->src[a->ipos + 1]);
                 if (e < 0) { fail(a, "bad escape \\%c", a->src[a->ipos + 1]); return; }
-                t->s[n++] = (char)e; a->ipos += 2;
-            } else { t->s[n++] = c; a->ipos++; }
+                t->s[n++] = (char)e; a->ipos += 2; a->col += 2;
+            } else { t->s[n++] = c; a->ipos++; a->col++; }
         }
         if (a->src[a->ipos] != '"') { fail(a, "unterminated string"); return; }
-        a->ipos++;
+        a->ipos++; a->col++;
         t->s[n] = 0; t->len = n; t->type = T_STR; return;
     }
     if (a->src[a->ipos] == '\'') {
         int v;
-        a->ipos++;
+        a->ipos++; a->col++;
         if (a->src[a->ipos] == '\\') {
             v = esc(a->src[a->ipos + 1]);
             if (v < 0 || !a->src[a->ipos + 1]) { fail(a, "bad char literal"); return; }
-            a->ipos += 2;
+            a->ipos += 2; a->col += 2;
         } else {
             if (!a->src[a->ipos]) { fail(a, "bad char literal"); return; }
-            v = (unsigned char)a->src[a->ipos]; a->ipos++;
+            v = (unsigned char)a->src[a->ipos]; a->ipos++; a->col++;
         }
         if (a->src[a->ipos] != '\'') { fail(a, "expected closing quote"); return; }
-        a->ipos++;
+        a->ipos++; a->col++;
         t->num = v; t->type = T_CHR; return;
     }
     if (is_dig(a->src[a->ipos])) {
@@ -324,19 +481,20 @@ static void next_tok(asmx *a, token *t)
         if (a->src[a->ipos] == '0' &&
             (a->src[a->ipos + 1] == 'x' || a->src[a->ipos + 1] == 'X')) {
             int ndig = 0;
-            a->ipos += 2;
+            a->ipos += 2; a->col += 2;
             for (;;) {
                 int c = a->src[a->ipos], d;
                 if (is_dig(c)) d = c - '0';
                 else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
                 else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
                 else break;
-                v = v * 16 + (uint64_t)d; a->ipos++; ndig++;
+                v = v * 16 + (uint64_t)d; a->ipos++; a->col++; ndig++;
             }
             if (ndig == 0) { fail(a, "empty 0x literal"); t->type = T_EOF; return; }
         } else {
             while (is_dig(a->src[a->ipos])) {
-                v = v * 10 + (uint64_t)(a->src[a->ipos] - '0'); a->ipos++;
+                v = v * 10 + (uint64_t)(a->src[a->ipos] - '0');
+                a->ipos++; a->col++;
             }
         }
         t->num = (flint_word)v; t->type = T_NUM; return;
@@ -344,10 +502,10 @@ static void next_tok(asmx *a, token *t)
     switch (a->src[a->ipos]) {
     case '[': case ']': case ',': case ':': case '+': case '-':
         t->type = T_PUNCT; t->s[0] = a->src[a->ipos]; t->s[1] = 0;
-        a->ipos++; return;
+        a->ipos++; a->col++; return;
     default:
         fail(a, "stray character '%c'", a->src[a->ipos]);
-        a->ipos++; t->type = T_EOF; return;
+        a->ipos++; a->col++; t->type = T_EOF; return;
     }
 }
 
@@ -486,15 +644,15 @@ static int do_macro_def(asmx *a)
 }
 
 /* name a1, a2 — substitute %1..%N into the body and queue it as a frame.
- * inv_line is the invocation line: body diagnostics report it. */
-static int macro_expand(asmx *a, int mi, token *t, uint32_t inv_line)
+ * inv_line/inv_col are the invocation site: body diagnostics report it. */
+static int macro_expand(asmx *a, int mi, token *t, uint32_t inv_line, uint32_t inv_col)
 {
     macrodef *m = &a->macs[mi];
     tokbuf args[FLINX_MAX_MARGS];
     tokbuf cur = {0}, exp = {0};
     int nargs = 0, depth = 0, ok = 0;
     uint32_t i, j;
-    uint32_t after_line;
+    uint32_t after_line, after_col;
 
     memset(args, 0, sizeof(args));
 
@@ -527,9 +685,11 @@ static int macro_expand(asmx *a, int mi, token *t, uint32_t inv_line)
         memset(&cur, 0, sizeof(cur));
     }
 
-    /* errors inside the body are reported at the invocation line */
+    /* errors inside the body are reported at the invocation site */
     after_line = a->line;
+    after_col  = a->col;
     a->line = inv_line;
+    a->col  = inv_col;
 
     if (nargs != m->argc) {
         fail(a, "macro \"%s\" expects %d argument%s, got %d",
@@ -568,6 +728,7 @@ static int macro_expand(asmx *a, int mi, token *t, uint32_t inv_line)
         f->saved_have = a->have_v;
         f->saved_tok  = a->ahead_v;
         f->saved_line = after_line;
+        f->saved_col  = after_col;
         a->have_v = 0;
         exp.t = 0; exp.n = 0; exp.cap = 0;   /* the frame owns the list */
     }
@@ -698,7 +859,7 @@ static int parse_reg(asmx *a, int *r, token *t)
         return 0;
     }
     n = reg_no(t);
-    if (n < 0) { fail(a, "expected register r0..r15"); return 0; }
+    if (n < 0) { fail_tok(a, t, "expected register r0..r15"); return 0; }
     nx(a, t);
     *r = n;
     return 1;
@@ -750,7 +911,7 @@ static int parse_mem(asmx *a, opr *o, token *t)
     o->idx = 0;
 
     pk(a, t);
-    if (t->type != T_PUNCT || t->s[0] != '[') { fail(a, "expected '['"); return 0; }
+    if (t->type != T_PUNCT || t->s[0] != '[') { fail_tok(a, t, "expected '['"); return 0; }
     nx(a, t);
 
     pk(a, t);
@@ -1125,7 +1286,7 @@ static void m_sys(asmx *a)
 {
     token t;
     pk(a, &t);
-    if (t.type != T_NUM) { fail(a, "expected syscall number"); return; }
+    if (t.type != T_NUM) { fail_tok(a, &t, "expected syscall number"); return; }
     nx(a, &t);
     if (t.num < 0 || t.num > 255) { fail(a, "syscall number out of range"); return; }
     e_cst(a, OP_INT); e_cst(a, (int)t.num);
@@ -1252,6 +1413,7 @@ static void pop_file(asmx *a)
     a->src      = f->saved_src;
     a->ipos     = f->saved_ipos;
     a->line     = f->saved_line;
+    a->col      = f->saved_col;
     a->cur_name = f->saved_name;
     a->cur_dir  = f->saved_dir;
     a->cur_owned = f->saved_owned;
@@ -1312,6 +1474,7 @@ static void do_include(asmx *a)
     f->saved_src   = a->src;
     f->saved_ipos  = a->ipos;
     f->saved_line  = a->line;
+    f->saved_col   = a->col;
     f->saved_name  = a->cur_name;
     f->saved_dir   = a->cur_dir;
     f->saved_owned = a->cur_owned;
@@ -1323,6 +1486,7 @@ static void do_include(asmx *a)
     a->src       = text;
     a->ipos      = 0;
     a->line      = 1;
+    a->col       = 1;
     a->cur_owned = 1;
     a->have_v    = 0;
     a->ahead_v.type = T_EOF; a->ahead_v.len = 0; a->ahead_v.s[0] = 0; a->ahead_v.num = 0;
@@ -1332,6 +1496,7 @@ static void do_include(asmx *a)
         free(a->cur_name); free(a->cur_dir);
         a->cur_name = f->saved_name; a->cur_dir = f->saved_dir;   /* undo */
         a->src = f->saved_src; a->ipos = f->saved_ipos; a->line = f->saved_line;
+        a->col = f->saved_col;
         a->cur_owned = f->saved_owned; a->have_v = f->saved_have; a->ahead_v = f->saved_tok;
         a->section = f->saved_section;
         memcpy(a->last_global, f->saved_last_global, sizeof(a->last_global));
@@ -1393,7 +1558,7 @@ static int asm_statement(asmx *a, const mnem_t *m, const char *nm)
 static int asm_scan(asmx *a)
 {
     token t, t2;
-    uint32_t tline;
+    uint32_t tline, tcol;
 
     for (;;) {
         pk(a, &t);
@@ -1417,6 +1582,7 @@ static int asm_scan(asmx *a)
         }
         nx(a, &t);                          /* ident consumed */
         tline = a->line;                    /* its line: lookahead may lex on */
+        tcol  = t.col;                      /* its start column */
 
         pk(a, &t2);
         if (t2.type == T_PUNCT && t2.s[0] == ':') {
@@ -1443,7 +1609,7 @@ static int asm_scan(asmx *a)
         {
             int mi = macro_find(a, t.s);
             if (mi >= 0) {                     /* macro shadows a mnemonic */
-                if (!macro_expand(a, mi, &t, tline)) break;
+                if (!macro_expand(a, mi, &t, tline, tcol)) break;
                 continue;
             }
         }
@@ -1721,7 +1887,8 @@ int flint_assemble_ctx(const char *src, const char *src_name,
     }
     memset(&a, 0, sizeof(a));
     memset(out, 0, sizeof(*out));
-    a.src = src; a.ipos = 0; a.line = 1; a.section = S_CODE;
+    a.src = src; a.ipos = 0; a.line = 1; a.col = 1; a.section = S_CODE;
+    a.filename = src_name ? src_name : "<src>";
     a.inc_fn = inc_fn; a.inc_ud = inc_ud;
     a.cur_name = dupstr(src_name ? src_name : "<src>");
     a.cur_dir  = src_name ? dir_of(src_name) : dupstr(".");
