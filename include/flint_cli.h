@@ -99,10 +99,22 @@ int flint_cli_cmd_run_opts(const char *arg, const flint_run_opts *opts);
 /* command verbs: arg may be NULL (cwd project) */
 /* scaffold <dir>. mem_given == 0 asks on stdin (Enter = manual). */
 int flint_cli_cmd_new(const char *dir, flint_mem_mode mem, int mem_given);
+
+/* build kind: bytecode image / standalone ELF / fused shared library */
+typedef enum {
+    FLINT_BUILD_FBC = 0,
+    FLINT_BUILD_ELF,
+    FLINT_BUILD_SO
+} flint_build_kind;
+
 /* assemble <file.flt|dir> into one .fbc image; out NULL = build/<name>.fbc.
- * elf != 0 instead fuses build/stub.elf + the program into a standalone
- * executable (out NULL = target/<name>) — see flint_stub.h */
-int flint_cli_cmd_build(const char *arg, const char *out, int elf);
+ * FLINT_BUILD_ELF instead fuses build/stub.elf + the program into a
+ * standalone executable (out NULL = target/<name>) — see flint_stub.h;
+ * FLINT_BUILD_SO fuses build/stub.so + the images + the exported symbols
+ * into a dlopen-able shared library (out NULL = target/lib<name>.so) —
+ * see flint_so.h */
+int flint_cli_cmd_build(const char *arg, const char *out,
+                        flint_build_kind kind);
 int flint_cli_cmd_run(const char *arg);   /* .flt file or project dir */
 int flint_cli_cmd_check(const char *arg);
 int flint_cli_cmd_dis(const char *arg);

@@ -1,4 +1,4 @@
-# FLINT 0.4.0-pre.9
+# FLINT 0.4.0-beta.1
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.
@@ -13,6 +13,7 @@ embed core:    include/flint.h + src/flint_core.c + src/flint_gc.c
                + src/flint_asm.c                    (only if asm→bytecode is needed)
 executable:    + src/flint_cli.c + src/main.c       (CLI host: stdio + POSIX file syscalls)
                + src/flint_img.c                    (host-side: .fbc image container)
+shared lib:    + src/stub_so.c + include/flint_so.h (dlopen host: flint build --so)
 ```
 
 ---
@@ -71,7 +72,7 @@ right before `exit`.
 
 ```
 flint new <dir> [--memory auto|manual]   scaffold a project (prompts if omitted)
-flint build <file.flt|dir> [-o out] [--elf]  build .fbc image / standalone ELF
+flint build <file.flt|dir> [-o out] [--elf|--so]  build .fbc / ELF / .so
 flint run <file.flt|file.fbc>            run a source file or a built image
 flint run [dir]                          run a project (default: current directory)
 flint run [<arg>] [--gc-stats] [--gc-stress] [--memory auto|manual]
@@ -219,6 +220,75 @@ where the toolchain ships a static libc (glibc/musl); Termux's bionic has
 none, so it falls back to `-static-libgcc` + the system libc
 (`make STUB_LDFLAGS=...` forces a choice).
 
+### Shared libraries (--so)
+
+`flint build --so` fuses `build/stub.so` with the program into a shared
+library at `target/lib<name>.so` — `-o` picks another path; a missing
+stub is a build error (`make` builds it). Any process can `dlopen()` the
+result and call into the bytecode through the API in
+`include/flint_so.h`:
+
+```
+[ stub.so ][ code ][ mem ][ exported symbols ][ trailer ]
+```
+
+The dynamic loader maps the stub's segments and ignores the appended
+payload — the same self-extracting trick as `--elf`, with `dladdr` (and
+a `/proc/self/maps` fallback) instead of `/proc/self/exe`. The trailer is
+checksummed, so a truncated or post-processed file fails to load with
+`flint_so_error()` set rather than crashing. Exported labels come from
+the `export` directive (see the syntax section) — global code labels
+only:
+
+```
+$ cat demo.flt
+code:
+export s_double
+s_double:
+    add r0, r0, r0
+    return
+main:
+    set r0, 0
+    exit
+$ flint build --so demo.flt
+   Compiling demo [manual]
+    Finished target/libdemo.so (168.0 KiB) in 0ms
+```
+
+```c
+#include <dlfcn.h>
+#include "flint_so.h"                    /* decls + error codes */
+
+void *h = dlopen("./target/libdemo.so", RTLD_NOW);
+flint_word (*run)(void) = /* dlsym(h, "flint_so_run") */;
+int (*call)(flint_vm *, const char *, const flint_word *, int, flint_word *) =
+    /* dlsym(h, "flint_so_call") */;
+
+run();                                   /* fresh VM: run main, r0 at HLT */
+flint_vm *vm = flint_so_vm_new();        /* or drive an isolated instance */
+flint_word in = 21, out;
+call(vm, "s_double", &in, 1, &out);      /* out = 42 (args travel in r0..r3) */
+flint_so_vm_free(vm);
+```
+
+The fused library also exports the whole flint core API (`flint_init`,
+`flint_run`, `flint_sys_set`, the collector calls, ...), so embedding
+hosts can drive the images directly. `flint_so_run_args` feeds
+`sys 12..14`; `flint_so_call` runs an exported label through a
+`call r15` trampoline appended past the payload code — the VM core needs
+no call-in API. Both memory models work (a fused `auto` program runs on
+its collector), and several fused libraries can coexist in one process —
+each carries its own payload state. Caveats: build for the target
+architecture like `--elf`; treat the fused file as final (`strip` and
+similar tools rewrite the file and drop the payload); and load with
+`RTLD_LOCAL` (the default) — the library exports the whole core API, and
+under `RTLD_GLOBAL` those symbols would interpose across the host and
+other fused libraries.
+
+`make test` fuses `tests/so_demo.flt` and drives it from
+`tests/test_so.c` — load, run, args, call-by-name, error paths, two
+instances.
+
 ---
 
 ## Project (Flint.toml)
@@ -314,6 +384,26 @@ in immediate position. The value is a number, a character literal,
 `-value`, or an earlier equate — forward references are not resolved
 (assembly is single-pass). One value per line; re-defining a name is an
 error.
+
+### Exports: `export`
+
+`export name` publishes a global code label in the program's symbol
+table — the host-side hook for `flint build --so` (see Shared libraries).
+The line emits no bytecode and the label may be defined later in the
+file (forward references resolve like every other label):
+
+```
+export s_sha256
+s_sha256:
+    ...
+    return
+```
+
+Only global code labels can be exported — locals, data labels and
+undefined names are assembly errors, as is exporting the same name
+twice. Names are capped at 59 characters (the fixed record size in
+`flint_so.h`). `.fbc` images and standalone ELFs ignore the table;
+embedders reach it as `flint_prog.syms` / `nsyms` (see flint.h).
 
 ### Sections and data
 
@@ -764,18 +854,19 @@ const char *txt = vm.err_text;         /* human-readable line */
 ## Building
 
 ```
-make          # build/flint + build/stub.elf (--elf stub)
-make test     # full bench: core + asm + heap + gc + examples + the
-              # tests/gc.sh integration run (4 exec paths x base64 vs base64 -w0)
+make          # build/flint + build/stub.elf + build/stub.so (the stubs)
+make test     # full bench: core + asm + heap + gc + the fused .so host
+              # + examples + the tests/gc.sh integration run
+              # (4 exec paths x base64 vs base64 -w0)
 make bench    # build the bench examples + compare run speeds
 make clean
 ```
 
 Tagged releases also ship prebuilt archives (x86_64 Linux built and
 tested by the release workflow, aarch64 Termux built locally); each
-contains `flint`, `build/stub.elf` and the standard `lib/`, so programs
-with `include` and `flint build --elf` both work from the extracted
-directory.
+contains `flint`, `build/stub.elf`, `build/stub.so` and the standard
+`lib/`, so programs with `include`, `flint build --elf` and
+`flint build --so` all work from the extracted directory.
 
 Embedding is minimal: `flint_core.c` + `flint_gc.c` (+ `flint_asm.c` if
 you want source assembly) is one TU each; build with `-I include`.
@@ -799,6 +890,8 @@ tests/sha256_test.flt empty / abc / long NIST vectors (SHA-256)
 tests/base64_test.flt RFC 4648 vectors + padded/unpadded/whitespace decode + round-trip
 tests/mem.flt     flint                               (s_memset/s_memcpy via .include)
 tests/heap.flt    heap mode: manual + heap ok         (alloc/free + persistent allocations)
+tests/so_demo.flt main + s_triple/s_sum3 exports      (flint build --so demo; make test
+                                                       drives target/libso_demo.so)
 ```
 
 Benchmark examples (project form + single-file form of each):

@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.4.0-beta.1 — 2026-10-26
+
+### Added
+
+- **Fused shared libraries (`flint build --so`)**: `build/stub.so` + the
+  program's images + a symbol table + a trailing header fuse into
+  `target/lib<name>.so` — a dlopen-able host for the program, the third
+  member of the self-extracting family next to `.fbc` and `--elf`. The
+  dynamic loader maps the stub's segments and ignores the appended
+  payload; at load time the stub locates its own file through `dladdr`
+  (with a `/proc/self/maps` fallback for search-path loads), validates
+  the trailer (magic "FLSO", version, sizes, symbol records, FNV-1a
+  checksum over code/mem/symbols) and serves the images through a new
+  API (`include/flint_so.h`): `flint_so_loaded` / `flint_so_error`,
+  `flint_so_run` / `flint_so_run_args` (fresh VM per call),
+  `flint_so_vm_new` / `_vm_free` / `_vm_run` (isolated instances with
+  the CLI syscall table), and `flint_so_call` / `flint_so_find` (call
+  exported labels by name, up to 4 args in r0..r3, through a `call r15`
+  trampoline appended past the payload code — no VM-core changes). The
+  whole flint core API is exported from the library too.
+- **`export` directive** (`src/flint_asm.c`): `export name` publishes a
+  global code label in `flint_prog.syms` (name + code offset, in source
+  order). The line emits no bytes, forward references resolve after the
+  fixup pass, and locals / data labels / undefined names / duplicates
+  are assembly errors pointing at the directive's line. Names cap at 59
+  characters (`FLINT_SYM_NAME_MAX`); `.fbc` images and standalone ELFs
+  ignore the table.
+- **`include/flint_so.h`** — the container format (36-byte trailer,
+  64-byte symbol records, little-endian u32 fields + raw name bytes,
+  same conventions as `flint_img.h` / `flint_stub.h`), the host API
+  declarations and the `FLINT_SO_*` result codes.
+- **`src/stub_so.c`** — the shared-library host (`build/stub.so`, built
+  PIC by the Makefile, same source set as `stub.elf`).
+- **Tests**: `tests/so_demo.flt` + `tests/test_so.c` — dlopen, load
+  validation, one-shot and instance runs, `sys 12` args, call-by-name
+  (including calling before `main` on a fresh VM), error paths (unknown
+  symbol, bad nargs, NULL vm, trap + recovery), two isolated instances,
+  and a bare-name `LD_LIBRARY_PATH` load (exercises the maps fallback on
+  glibc). `test_asm` covers `export`: symbol table content, the
+  trampoline call pattern, forward references, and the rejection paths
+  (duplicate, data label, local, undefined at its line).
+
+### Changed
+
+- `flint_prog` carries the exported-label table (`flint_sym *syms` /
+  `uint32_t nsyms`, freed by `flint_prog_free`); `flint_img_load` zeroes
+  it (`.fbc` has no symbol table).
+- `flint_cli_cmd_build()` takes a `flint_build_kind` (FBC / ELF / SO)
+  instead of the `elf` flag; `flint build --elf --so` is rejected as
+  mutually exclusive.
+- Makefile: `all` also builds `build/stub.so`; `make test` builds and
+  drives the fused `.so`; `release.yml` ships `build/stub.so` in the
+  release archives.
+- README: "Shared libraries (--so)" section, `export` syntax, `--so` in
+  the CLI tables; `main.c` usage text.
+
 ## 0.4.0-pre.9 — 2026-10-26
 
 ### Added

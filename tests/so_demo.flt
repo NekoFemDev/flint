@@ -1,0 +1,35 @@
+// tests/so_demo.flt — `flint build --so` demo: main + two exports.
+// `make test` fuses it into target/libso_demo.so and drives it from
+// tests/test_so.c (dlopen + flint_so_call by name).
+
+data:
+msg: str "so-demo: ok", 10, 0
+
+code:
+// r0 = r0 * 3
+export s_triple
+s_triple:
+    set r1, 3
+    mul r0, r0, r1
+    return
+
+// r0 = r0 + r1 + r2
+export s_sum3
+s_sum3:
+    add r0, r0, r1
+    add r0, r0, r2
+    return
+
+// always traps (division by zero) — drives flint_so_call's ETRAP path
+export s_div0
+s_div0:
+    set r1, 0
+    div r0, r0, r1
+    return
+
+main:
+    set r1, msg
+    set r2, 12
+    sys 0              // print "so-demo: ok\n"
+    sys 12             // r0 = argc (0 without program arguments)
+    exit

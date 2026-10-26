@@ -1,2 +1,7 @@
 build/
 target/
+*.zip
+*.tar
+*.tar.gz
+.git/
+.github/

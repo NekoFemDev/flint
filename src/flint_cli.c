@@ -27,6 +27,7 @@
 #include "flint_cli.h"
 #include "flint_img.h"
 #include "flint_stub.h"
+#include "flint_so.h"
 
 /* ---------------- standard syscalls ---------------- */
 
@@ -1422,6 +1423,92 @@ static int build_elf(const char *out, const flint_prog *p, flint_mem_mode mem,
     return 0;
 }
 
+/* fuse build/stub.so + code + mem + symbol records + trailer into `out`
+ * (see flint_so.h); chmod 0755 for symmetry with the --elf output;
+ * 0 = ok, -1 with err set (partial output removed) */
+static int build_so(const char *out, const flint_prog *p, flint_mem_mode mem,
+                    char *err, uint32_t errsz)
+{
+    unsigned char tr[FLINT_SO_TRAILER];
+    unsigned char rec[FLINT_SO_SYMBOL];
+    FILE *f;
+    uint32_t i, j, sum = 2166136261u;    /* FNV-1a, same as flint_img.c */
+    int ok = 1;
+
+    if (p->nsyms > FLINT_SO_SYM_MAX) {
+        snprintf(err, errsz, "too many exported labels (%u > %u)",
+                 (unsigned)p->nsyms, (unsigned)FLINT_SO_SYM_MAX);
+        return -1;
+    }
+
+    f = fopen(out, "wb");
+    if (!f) {
+        snprintf(err, errsz, "%.300s: cannot write (%s)", out, strerror(errno));
+        return -1;
+    }
+
+    if (append_file(f, FLINT_SO_STUB_PATH, err, errsz) != 0) ok = 0;
+    if (ok && fwrite(p->code, 1, p->code_size, f) != p->code_size) {
+        snprintf(err, errsz, "%.300s: write failed", out);
+        ok = 0;
+    }
+    for (i = 0; ok && i < p->code_size; i++) {
+        sum ^= p->code[i]; sum *= 16777619u;
+    }
+    if (ok && fwrite(p->mem, 1, p->mem_size, f) != p->mem_size) {
+        snprintf(err, errsz, "%.300s: write failed", out);
+        ok = 0;
+    }
+    for (i = 0; ok && i < p->mem_size; i++) {
+        sum ^= p->mem[i]; sum *= 16777619u;
+    }
+    for (i = 0; ok && i < p->nsyms; i++) {
+        size_t nl = strlen(p->syms[i].name);
+        if (nl > FLINT_SO_SYM_NAME - 1) nl = FLINT_SO_SYM_NAME - 1;
+        memset(rec, 0, sizeof rec);
+        elf_put_u32(rec, p->syms[i].pc);
+        memcpy(rec + 4, p->syms[i].name, nl);   /* the rest stays NUL */
+        if (fwrite(rec, 1, sizeof rec, f) != sizeof rec) {
+            snprintf(err, errsz, "%.300s: write failed", out);
+            ok = 0;
+            break;
+        }
+        for (j = 0; j < sizeof rec; j++) {
+            sum ^= rec[j]; sum *= 16777619u;
+        }
+    }
+    if (ok) {
+        elf_put_u32(tr + 0,  FLINT_SO_MAGIC);
+        elf_put_u32(tr + 4,  FLINT_SO_VERSION);
+        elf_put_u32(tr + 8,  p->code_size);
+        elf_put_u32(tr + 12, p->mem_size);
+        elf_put_u32(tr + 16, p->entry);
+        elf_put_u32(tr + 20, p->heap_start);
+        elf_put_u32(tr + 24, (uint32_t)mem);
+        elf_put_u32(tr + 28, p->nsyms);
+        elf_put_u32(tr + 32, sum);
+        if (fwrite(tr, 1, sizeof tr, f) != sizeof tr) {
+            snprintf(err, errsz, "%.300s: write failed", out);
+            ok = 0;
+        }
+    }
+    if (fclose(f) != 0) {
+        if (ok) snprintf(err, errsz, "%.300s: write failed", out);
+        ok = 0;
+    }
+    if (ok && chmod(out, 0755) != 0) {
+        snprintf(err, errsz, "%.300s: cannot chmod 0755 (%s)", out,
+                 strerror(errno));
+        ok = 0;
+    }
+
+    if (!ok) {
+        remove(out);                 /* no half-written libraries */
+        return -1;
+    }
+    return 0;
+}
+
 /* ---- cargo-style status output ---- */
 
 #define CLR_RESET     "\033[0m"
@@ -1463,9 +1550,12 @@ static void print_dependency_tree(const DepNode *node, const char *prefix,
 
 /* assemble <file.flt|dir> into one self-contained .fbc image; includes
  * are resolved here, so the image needs no sources at run time. With
- * elf != 0 the output is build/stub.elf fused with the program instead:
- * one executable, no flint host needed at run time. */
-int flint_cli_cmd_build(const char *arg, const char *outarg, int elf)
+ * FLINT_BUILD_ELF the output is build/stub.elf fused with the program:
+ * one executable, no flint host needed at run time. With FLINT_BUILD_SO
+ * it is build/stub.so fused with the program's images and exported
+ * symbols: one shared library any host can dlopen (see flint_so.h). */
+int flint_cli_cmd_build(const char *arg, const char *outarg,
+                        flint_build_kind kind)
 {
     int from_file = (arg != 0 && is_flint_file(arg));
     const char *root = arg ? arg : ".";
@@ -1535,13 +1625,18 @@ int flint_cli_cmd_build(const char *arg, const char *outarg, int elf)
         return 1;
     }
 
-    /* the --elf stub must have been built first (Makefile: build/stub.elf);
-     * checked before target/ is created so a failed build leaves nothing */
-    if (elf && stat(FLINT_STUB_PATH, &st) != 0) {
-        fprintf(stderr, "flint build: %s missing, run make\n", FLINT_STUB_PATH);
-        inc_ctx_free(&ic);
-        flint_prog_free(&p);
-        return 2;
+    /* --elf / --so need their prebuilt stub (Makefile: build/stub.elf,
+     * build/stub.so); checked before target/ is created so a failed
+     * build leaves nothing */
+    if (kind != FLINT_BUILD_FBC) {
+        const char *stub = (kind == FLINT_BUILD_SO) ? FLINT_SO_STUB_PATH
+                                                    : FLINT_STUB_PATH;
+        if (stat(stub, &st) != 0) {
+            fprintf(stderr, "flint build: %s missing, run make\n", stub);
+            inc_ctx_free(&ic);
+            flint_prog_free(&p);
+            return 2;
+        }
     }
 
     /* preprocessing succeeded: show what actually went into the image */
@@ -1555,15 +1650,22 @@ int flint_cli_cmd_build(const char *arg, const char *outarg, int elf)
             flint_prog_free(&p);
             return 2;
         }
-    } else if (elf) {
+    } else if (kind != FLINT_BUILD_FBC) {
         if (mkdir(ELF_OUTPUT_DIR, 0777) != 0 && errno != EEXIST) {
             fprintf(stderr, "flint build: cannot create %s/: %s\n",
                     ELF_OUTPUT_DIR, strerror(errno));
             flint_prog_free(&p);
             return 2;
         }
-        if (snprintf(out, sizeof out, ELF_OUTPUT_DIR "/%.100s", name) >=
-            (int)sizeof out) {
+        if (kind == FLINT_BUILD_SO) {
+            if (snprintf(out, sizeof out, ELF_OUTPUT_DIR "/lib%.100s.so",
+                         name) >= (int)sizeof out) {
+                fprintf(stderr, "flint build: output path too long\n");
+                flint_prog_free(&p);
+                return 2;
+            }
+        } else if (snprintf(out, sizeof out, ELF_OUTPUT_DIR "/%.100s", name) >=
+                   (int)sizeof out) {
             fprintf(stderr, "flint build: output path too long\n");
             flint_prog_free(&p);
             return 2;
@@ -1583,8 +1685,14 @@ int flint_cli_cmd_build(const char *arg, const char *outarg, int elf)
         }
     }
 
-    if (elf) {
+    if (kind == FLINT_BUILD_ELF) {
         if (build_elf(out, &p, mem, err, sizeof err) != 0) {
+            fprintf(stderr, "flint: %s\n", err);
+            flint_prog_free(&p);
+            return 2;
+        }
+    } else if (kind == FLINT_BUILD_SO) {
+        if (build_so(out, &p, mem, err, sizeof err) != 0) {
             fprintf(stderr, "flint: %s\n", err);
             flint_prog_free(&p);
             return 2;

@@ -6,9 +6,10 @@ TESTSRC   = src/flint_core.c src/flint_gc.c src/flint_asm.c
 
 BIN       = build/flint
 STUB      = build/stub.elf
+SO        = build/stub.so
 TESTS     = build/test_core build/test_asm build/test_heap build/test_gc
 
-all: $(BIN) $(STUB)
+all: $(BIN) $(STUB) $(SO)
 
 $(BIN): $(SRC) src/main.c src/flint_dis.c include/flint.h include/flint_cli.h include/flint_img.h include/flint_stub.h include/flint_ui.h
 	@mkdir -p build
@@ -45,6 +46,19 @@ $(STUB): src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cl
 	  src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
 	  src/flint_img.c src/flint_dis.c
 
+# `flint build --so` fuses this shared library with the program's images
+# and exported symbols into target/lib<name>.so — see include/flint_so.h.
+# Same source set as the ELF stub, built PIC; a shared library always
+# links the system libc dynamically, so no STUB_LDFLAGS here.
+$(SO): src/stub_so.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
+       src/flint_img.c src/flint_dis.c \
+       include/flint.h include/flint_cli.h include/flint_img.h include/flint_so.h \
+       include/flint_ui.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fPIC -shared -pthread -o $@ \
+	  src/stub_so.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
+	  src/flint_img.c src/flint_dis.c
+
 build/test_core: tests/test_core.c src/flint_core.c include/flint.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(TESTSRC) tests/test_core.c -o $@
@@ -61,7 +75,12 @@ build/test_gc: tests/test_gc.c src/flint_core.c src/flint_gc.c src/flint_asm.c i
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(TESTSRC) tests/test_gc.c -o $@
 
-test: $(TESTS) $(BIN) $(STUB)
+# host for the fused .so (`make test` drives target/libso_demo.so)
+build/test_so: tests/test_so.c include/flint.h include/flint_so.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/test_so.c -ldl
+
+test: $(TESTS) $(BIN) $(STUB) $(SO) build/test_so
 	./build/test_core
 	./build/test_asm
 	./build/test_heap
@@ -113,6 +132,10 @@ test: $(TESTS) $(BIN) $(STUB)
 	  && ./target/heap | grep -q "heap ok" \
 	  && ./target/heap | grep -q "mode: manual" \
 	  && echo "stub: hello + heap standalone ELFs run"
+	@./$(BIN) build --so tests/so_demo.flt >/dev/null \
+	  && ./build/test_so target/libso_demo.so \
+	  && LD_LIBRARY_PATH=target ./build/test_so libso_demo.so >/dev/null \
+	  && echo "stub.so: fused shared library runs + calls exports"
 	@sh tests/gc.sh
 
 bench: $(BIN)

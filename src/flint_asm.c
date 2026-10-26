@@ -24,6 +24,8 @@
  *              substituted before labels, may alias an earlier equate)
  *   sections   code: / data:  (code is the default)
  *   labels     name:  |  .local:   (locals attach to last global)
+ *   exports    export name        (publish a global code label in the
+ *              flint_prog symbol table — see include/flint_so.h)
  *   includes   include "file"  |  .include "file"   (same directive)
  *   macros     %macro name argc ... %endmacro; invoke as `name a1, a2`
  *              (%1..%N in the body substitute the invocation arguments)
@@ -122,6 +124,15 @@ typedef struct { char name[T_MAX]; flint_word addr; int kind; } symbol;
 /* name equ value — a compile-time immediate alias (absolute 64-bit word) */
 typedef struct { char name[T_MAX]; flint_word value; } equate;
 
+/* export name — a global code label to publish in flint_prog.syms.
+ * Resolution happens after labels (forward references are fine), so the
+ * directive records its own position for diagnostics. */
+typedef struct {
+    char     name[T_MAX];
+    char     file[T_MAX];
+    uint32_t line, col;
+} exportrec;
+
 /* ---- lexer ---- */
 
 enum { T_IDENT, T_NUM, T_STR, T_CHR, T_PUNCT, T_EOL, T_EOF, T_MARG };
@@ -197,6 +208,7 @@ typedef struct {
     symbol  *syms; uint32_t ns, cs;
     equate  *eqs;  uint32_t neq, ceq;
     fixup   *fix;  uint32_t nf, cf;
+    exportrec *exp; uint32_t nexp, cexp;
 
     char     last_global[T_MAX];
     int      section;
@@ -1496,6 +1508,58 @@ static int do_equ(asmx *a, const token *name)
     return eq_add(a, name, v);
 }
 
+/* export name — publish a global code label in the flint_prog symbol
+ * table (the fused .so calls into the program through it; see
+ * include/flint_so.h). The scanner has `export` consumed and the name
+ * peeked; this consumes the rest of the line. Resolution happens after
+ * labels, so the label may be defined later in the file. */
+static int do_export(asmx *a)
+{
+    token t;
+    exportrec *ne;
+    uint32_t i;
+
+    pk(a, &t);
+    if (t.type != T_IDENT || t.s[0] == '.' || reg_no(&t) >= 0) {
+        fail_tok(a, &t, "export takes a global code label");
+        return 0;
+    }
+    if (strlen(t.s) >= FLINT_SYM_NAME_MAX) {
+        fail_tok(a, &t, "export name too long (max %u chars)",
+                 (unsigned)(FLINT_SYM_NAME_MAX - 1));
+        return 0;
+    }
+    for (i = 0; i < a->nexp; i++)
+        if (strcmp(a->exp[i].name, t.s) == 0) {
+            fail_tok(a, &t, "duplicate export \"%s\"", t.s);
+            return 0;
+        }
+
+    if (a->nexp + 1 > a->cexp) {
+        uint32_t nc = a->cexp ? a->cexp * 2 : 16;
+        exportrec *nx = (exportrec *)realloc(a->exp, nc * sizeof(exportrec));
+        if (!nx) { fail(a, "out of memory"); return 0; }
+        a->exp = nx; a->cexp = nc;
+    }
+    ne = &a->exp[a->nexp];
+    memset(ne, 0, sizeof(*ne));
+    snprintf(ne->name, sizeof(ne->name), "%s", t.s);
+    snprintf(ne->file, sizeof(ne->file), "%s",
+             a->cur_name ? a->cur_name : "<src>");
+    ne->line = t.line;
+    ne->col  = t.col;
+    a->nexp++;
+
+    nx(a, &t);                       /* consume the name */
+    pk(a, &t);
+    if (t.type != T_EOL && t.type != T_EOF) {
+        fail_tok(a, &t, "unexpected text after export name");
+        return 0;
+    }
+    nx(a, &t);                       /* eat the line end (if any) */
+    return 1;
+}
+
 /* ---- include ---- */
 
 static void pop_file(asmx *a)
@@ -1694,6 +1758,11 @@ static int asm_scan(asmx *a)
             continue;
         }
 
+        if (strcmp(t.s, "export") == 0) {
+            if (!do_export(a)) break;
+            continue;
+        }
+
         if (strcmp(t.s, "include") == 0 || strcmp(t.s, ".include") == 0) {
             do_include(a); continue;
         }
@@ -1751,6 +1820,41 @@ static int asm_resolve(asmx *a)
         if (a->fix[i].buf == 0) bb_patch(&a->code, a->fix[i].at, a->syms[s].addr);
         else                    bb_patch(&a->mem,  a->fix[i].at, a->syms[s].addr);
     }
+    return 0;
+}
+
+/* resolve `export` records into out->syms: every name must hit a global
+ * code label (data labels and typos are errors at the directive's line).
+ * Runs after asm_resolve, so forward references have been defined. */
+static int asm_exports(asmx *a, flint_prog *out)
+{
+    uint32_t i;
+
+    if (a->nexp == 0) return 0;
+
+    for (i = 0; i < a->nexp; i++) {
+        int s = sym_find(a, a->exp[i].name);
+        if (s < 0) {
+            fail_at(a, a->exp[i].file, a->exp[i].line,
+                    "export \"%s\": undefined label", a->exp[i].name);
+            return -1;
+        }
+        if (a->syms[s].kind != S_CODE) {
+            fail_at(a, a->exp[i].file, a->exp[i].line,
+                    "export \"%s\": not a code label", a->exp[i].name);
+            return -1;
+        }
+    }
+
+    out->syms = (flint_sym *)calloc(a->nexp, sizeof(flint_sym));
+    if (!out->syms) { fail(a, "out of memory"); return -1; }
+    for (i = 0; i < a->nexp; i++) {
+        int s = sym_find(a, a->exp[i].name);
+        snprintf(out->syms[i].name, sizeof(out->syms[i].name), "%s",
+                 a->exp[i].name);
+        out->syms[i].pc = (uint32_t)a->syms[s].addr;
+    }
+    out->nsyms = a->nexp;
     return 0;
 }
 
@@ -1972,7 +2076,7 @@ static void flint_prog_free_tmp(asmx *a)
     free(a->macs);
     while (a->msp > 0) free(a->mf[--a->msp].toks);
     free(a->code.b); free(a->mem.b);
-    free(a->syms); free(a->eqs); free(a->fix);
+    free(a->syms); free(a->eqs); free(a->fix); free(a->exp);
 }
 
 int flint_assemble_ctx(const char *src, const char *src_name,
@@ -2029,6 +2133,13 @@ int flint_assemble_ctx(const char *src, const char *src_name,
             }
         }
     }
+    if (e == 0 && asm_exports(&a, out) != 0) {
+        /* leave `out` with nothing to free, like every other failure path */
+        free(out->code); free(out->mem); free(out->syms);
+        out->code = 0; out->mem = 0; out->syms = 0;
+        out->nsyms = 0;
+        e = -1;
+    }
 
     if (err && err_size) {
         snprintf(err, err_size, "%s", a.err);
@@ -2050,6 +2161,7 @@ void flint_prog_free(flint_prog *p)
     if (!p) return;
     free(p->code);
     free(p->mem);
-    p->code = 0; p->mem = 0;
-    p->code_size = 0; p->mem_size = 0;
+    free(p->syms);
+    p->code = 0; p->mem = 0; p->syms = 0;
+    p->code_size = 0; p->mem_size = 0; p->nsyms = 0;
 }

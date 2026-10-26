@@ -472,6 +472,48 @@ static const char *S_bad_equ_list =
 "main:\n"
 "    exit\n";
 
+/* v0.4.0-beta.1: export — the flint_prog symbol table (flint build --so) */
+
+static const char *S_export =
+"code:\n"
+"export helper\n"
+"main:\n"
+"    set r0, 1\n"
+"    exit\n"
+"helper:\n"
+"    set r0, 77\n"
+"    return\n";
+
+static const char *S_bad_export_dup =
+"code:\n"
+"export a\n"
+"export a\n"
+"a:\n"
+"    return\n"
+"main:\n"
+"    exit\n";
+
+static const char *S_bad_export_data =
+"data:\n"
+"export buf\n"
+"buf: bytes 8\n"
+"code:\n"
+"main:\n"
+"    exit\n";
+
+static const char *S_bad_export_undef =
+"code:\n"
+"export nope\n"
+"main:\n"
+"    exit\n";
+
+static const char *S_bad_export_local =
+"code:\n"
+"main:\n"
+"    export .loop\n"
+".loop:\n"
+"    exit\n";
+
 /* v0.4.0: NASM-style text macros (%macro / %endmacro, %1..%N) */
 
 static const char *S_macro0 =
@@ -761,6 +803,54 @@ int main(void)
 
     t_pp();
 
+    /* export: flint_prog.syms + the trampoline call pattern the .so uses */
+    {
+        flint_prog p; char err[256] = "";
+        if (flint_assemble(S_export, &p, 4096, err, sizeof(err)) != 0) {
+            printf("FAIL  export: assemble: %s\n", err); fails++;
+        } else {
+            if (p.nsyms == 1 && strcmp(p.syms[0].name, "helper") == 0 &&
+                p.syms[0].pc < p.code_size)
+                printf("PASS  export: symbol table (helper @ %u)\n",
+                       (unsigned)p.syms[0].pc);
+            else { printf("FAIL  export: symbol table wrong\n"); fails++; }
+
+            /* call the exported pc like the .so does: `call r15; exit` */
+            {
+                uint32_t n = p.code_size + 3;
+                flint_byte *code = (flint_byte *)malloc(n);
+                flint_vm vm;
+                flint_word rc;
+                if (!code) { printf("FAIL  export: out of memory\n"); fails++; }
+                else {
+                    memcpy(code, p.code, p.code_size);
+                    code[p.code_size]     = OP_CALLR;
+                    code[p.code_size + 1] = 15;
+                    code[p.code_size + 2] = OP_HLT;
+                    flint_init(&vm, code, n, p.mem, p.mem_size);
+                    vm.r[15] = (flint_word)p.syms[0].pc;
+                    rc = flint_run(&vm, p.code_size);
+                    if (vm.err == FLINT_OK && rc == 77)
+                        printf("PASS  export: trampoline call -> 77\n");
+                    else { printf("FAIL  export: trampoline rc=%lld err=%d\n",
+                                  (long long)rc, vm.err); fails++; }
+                    free(code);
+                }
+            }
+            flint_prog_free(&p);
+        }
+    }
+    {
+        flint_prog p; char err[256] = "";
+        if (flint_assemble(S_bad_export_undef, &p, 4096, err, sizeof(err)) == 0) {
+            printf("FAIL  export-undefined: accepted, expected error\n"); fails++;
+            flint_prog_free(&p);
+        } else if (strstr(err, ":2:") && strstr(err, "undefined")) {
+            printf("PASS  export: undefined label rejected at its line  (%s)\n",
+                   err);
+        } else { printf("FAIL  export-undefined: wrong error [%s]\n", err); fails++; }
+    }
+
     chk_reject(S_bad_mnem,  "unknown mnemonic rejected");
     chk_reject(S_bad_label, "undefined label rejected");
     chk_reject(S_bad_jdata, "jump to data label rejected");
@@ -778,6 +868,9 @@ int main(void)
     chk_reject(S_bad_equ_undef, "undefined equate value rejected");
     chk_reject(S_bad_equ_missing, "missing equ value rejected");
     chk_reject(S_bad_equ_list, "equ comma list rejected (one value per line)");
+    chk_reject(S_bad_export_dup,   "duplicate export rejected");
+    chk_reject(S_bad_export_data,  "export of a data label rejected");
+    chk_reject(S_bad_export_local, "export of a local label rejected");
     {
         flint_prog p; char err[256] = "";
         if (flint_assemble(S_bad_macro_body, &p, 4096, err, sizeof(err)) == 0) {

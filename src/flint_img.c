@@ -97,6 +97,7 @@ int flint_img_load(const char *path, flint_prog *p, flint_mem_mode *mem,
     p->code = 0; p->mem = 0;
     p->code_size = p->mem_size = 0;
     p->entry = p->heap_start = 0;
+    p->syms = 0; p->nsyms = 0;      /* .fbc carries no symbol table */
 
     f = fopen(path, "rb");
     if (!f) {

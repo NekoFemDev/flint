@@ -1,7 +1,7 @@
 /*
  * main.c — flint CLI entry.
  *   flint new <dir> [--memory auto|manual]   scaffold a project
- *   flint build <file.flt|dir> [-o out] [--elf]  build .fbc / standalone ELF
+ *   flint build <file.flt|dir> [-o out] [--elf|--so]  build .fbc / ELF / .so
  *   flint run <file.flt|file.fbc>   run source, or a built image
  *   flint run [dir] [--gc-stats] [--gc-stress] [--memory auto|manual]
  *   flint check <file.flt|file.fbc> assemble/validate without running
@@ -22,8 +22,9 @@ static void usage(FILE *o)
         "\n"
         "usage:\n"
         "  flint new <dir> [--memory auto|manual]   scaffold a project\n"
-        "  flint build <file.flt|dir> [-o out] [--elf]  build a bytecode\n"
-        "                                  image, or a standalone ELF\n"
+        "  flint build <file.flt|dir> [-o out] [--elf|--so]  build a\n"
+        "                                  bytecode image, a standalone\n"
+        "                                  ELF, or a dlopen-able .so\n"
         "  flint run <file.flt|file.fbc>   run source, or a built image\n"
         "  flint run [dir]        run a project (default: cwd)\n"
         "  flint run <file|dir> [args...]  program args reach the program\n"
@@ -50,6 +51,10 @@ static void usage(FILE *o)
         "`flint build --elf` fuses build/stub.elf with the program into\n"
         "target/<name> — one executable that runs without flint installed\n"
         "(`-o` overrides the path; needs `make` to build the stub first).\n"
+        "`flint build --so` fuses build/stub.so with the images and the\n"
+        "`export`-ed labels into target/lib<name>.so — a shared library\n"
+        "any host can dlopen; the exported labels are callable by name\n"
+        "(flint_so_call, see include/flint_so.h).\n"
         "\n"
         "exit code: r0 at HLT (or negative error code on trap)\n",
         FLINT_VERSION);
@@ -95,12 +100,12 @@ static int cmd_new_args(int argc, char **argv)
     return flint_cli_cmd_new(dir, mem, mem_given);
 }
 
-/* flint build <file.flt|dir> [-o out] [--elf] */
+/* flint build <file.flt|dir> [-o out] [--elf|--so] */
 static int cmd_build_args(int argc, char **argv)
 {
     const char *in = 0;
     const char *out = 0;
-    int elf = 0;
+    flint_build_kind kind = FLINT_BUILD_FBC;
     int i;
 
     for (i = 0; i < argc; i++) {
@@ -110,8 +115,16 @@ static int cmd_build_args(int argc, char **argv)
                 return 2;
             }
             out = argv[++i];
-        } else if (strcmp(argv[i], "--elf") == 0) {
-            elf = 1;
+        } else if (strcmp(argv[i], "--elf") == 0 ||
+                   strcmp(argv[i], "--so") == 0) {
+            flint_build_kind want = (argv[i][2] == 'e') ? FLINT_BUILD_ELF
+                                                        : FLINT_BUILD_SO;
+            if (kind != FLINT_BUILD_FBC && kind != want) {
+                fprintf(stderr,
+                        "flint build: --elf and --so are mutually exclusive\n");
+                return 2;
+            }
+            kind = want;
         } else if (argv[i][0] == '-' && argv[i][1] != 0) {
             fprintf(stderr, "flint build: unknown option %s\n", argv[i]);
             return 2;
@@ -122,7 +135,7 @@ static int cmd_build_args(int argc, char **argv)
             return 2;
         }
     }
-    return flint_cli_cmd_build(in, out, elf);
+    return flint_cli_cmd_build(in, out, kind);
 }
 
 /* flint run [file|dir] [--gc-stats] [--gc-stress] [--memory auto|manual]

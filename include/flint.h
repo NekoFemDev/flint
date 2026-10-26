@@ -90,7 +90,7 @@
 extern "C" {
 #endif
 
-#define FLINT_VERSION  "0.4.0-pre.9"
+#define FLINT_VERSION  "0.4.0-beta.1"
 #define FLINT_NREGS    16
 #define FLINT_MAX_SYS  64
 /* pseudo-register used in address-base fields; never a general register */
@@ -328,6 +328,17 @@ int  flint_gc_unpin(flint_vm *vm, flint_word addr);  /* 0 ok, -1 unknown */
 flint_word  flint_run(flint_vm *vm, uint32_t entry);
 int   flint_step(flint_vm *vm); /* execute exactly one instruction, 0 on ok */
 
+/* exported label — one `export name` directive's output: the label name
+ * and its code offset, ready for hosts that call into a program by name
+ * (the fused .so; see flint_so.h). FLINT_SYM_NAME_MAX counts the
+ * terminating NUL, and matches the .so symbol record. */
+#define FLINT_SYM_NAME_MAX 60
+
+typedef struct {
+    char     name[FLINT_SYM_NAME_MAX];
+    uint32_t pc;             /* code offset of the label */
+} flint_sym;
+
 /* assembler output: images ready for flint_vm_init */
 typedef struct flint_prog {
     flint_byte *code;        /* bytecode image        */
@@ -337,6 +348,10 @@ typedef struct flint_prog {
     uint32_t    entry;       /* offset of 'main'      */
     uint32_t    heap_start;  /* aligned end of the data section: first
                                 allocatable offset (feed to flint_heap_set) */
+    flint_sym  *syms;        /* `export`-ed code labels, in source order
+                                (NULL without the directive); malloc'd,
+                                freed by flint_prog_free */
+    uint32_t    nsyms;
 } flint_prog;
 
 /* assembler (isolated TU, never required by a VM-only embed) */
