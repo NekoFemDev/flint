@@ -382,6 +382,96 @@ static const char *S_r15 =
 "    sys 0\n"
 "    exit\n";
 
+/* v0.4.0: indirect jumps/calls and equ constants */
+
+static const char *S_jmpr =
+"code:\n"
+"main:\n"
+"    set r1, second\n"
+"    jump r1                // indirect through the register\n"
+"first:\n"
+"    set r0, 111            // must not run\n"
+"    sys 0\n"
+"    exit\n"
+"second:\n"
+"    set r0, 42\n"
+"    sys 0\n"
+"    exit\n";
+
+static const char *S_callr =
+"code:\n"
+"main:\n"
+"    set r1, answer\n"
+"    call r1                // indirect call; ret returns here\n"
+"    sys 0\n"
+"    exit\n"
+"answer:\n"
+"    set r0, 42\n"
+"    return\n";
+
+/* equ: constants substituted into immediates and branch compares */
+static const char *S_equ =
+"BASE  equ 10\n"
+"STEP  equ 2\n"
+"LIMIT equ 3\n"
+"code:\n"
+"main:\n"
+"    set r1, 0\n"
+"    set r0, 0\n"
+"loop:\n"
+"    jump.ge r1, LIMIT, done\n"
+"    add r0, BASE\n"
+"    add r0, STEP\n"
+"    inc r1\n"
+"    jump loop\n"
+"done:\n"
+"    sys 0\n"
+"    exit\n";
+
+static const char *S_equ_neg =
+"NEG equ -5\n"
+"code:\n"
+"main:\n"
+"    set r0, NEG\n"
+"    add r0, 15\n"
+"    sys 0\n"
+"    exit\n";
+
+static const char *S_equ_alias =
+"CHAR  equ 'A'\n"
+"ALIAS equ CHAR\n"
+"code:\n"
+"main:\n"
+"    set r0, ALIAS\n"
+"    sub r0, 23\n"
+"    sys 0\n"
+"    exit\n";
+
+static const char *S_bad_equ_dup =
+"code:\n"
+"DUP equ 1\n"
+"DUP equ 2\n"
+"main:\n"
+"    exit\n";
+
+static const char *S_bad_equ_undef =
+"code:\n"
+"X equ NOPE\n"
+"main:\n"
+"    exit\n";
+
+static const char *S_bad_equ_missing =
+"code:\n"
+"X equ\n"
+"main:\n"
+"    exit\n";
+
+static const char *S_bad_equ_list =
+"code:\n"
+"X equ 1, 2\n"
+"main:\n"
+"    exit\n";
+
 /* v0.4.0: NASM-style text macros (%macro / %endmacro, %1..%N) */
 
 static const char *S_macro0 =
@@ -566,6 +656,12 @@ int main(void)
     if (run_p(S_index_store, "index_store"))
         chk_out("77", "storx + auto-indexed load");
     if (run_p(S_r15,    "r15"))     chk_out("909",  "r15 usable");
+    if (run_p(S_jmpr,   "jmpr"))    chk_out("42",   "jump rs: indirect jump");
+    if (run_p(S_callr,  "callr"))   chk_out("42",   "call rs: indirect call + return");
+    if (run_p(S_equ,    "equ"))     chk_out("36",   "equ: arith + branch compares");
+    if (run_p(S_equ_neg,"equneg"))  chk_out("10",   "equ: negative value");
+    if (run_p(S_equ_alias, "equalias"))
+        chk_out("42", "equ: char literal + alias");
     if (run_p(S_macro0, "macro0"))
         chk_out("42", "macro: zero-arg SAVE_REGS/RESTORE_REGS");
     if (run_p(S_macro_args, "macroargs"))
@@ -678,6 +774,10 @@ int main(void)
     chk_reject(S_bad_macro_ref,  "%N out of range rejected");
     chk_reject(S_bad_macro_count, "wrong macro argument count rejected");
     chk_reject(S_bad_marg,  "%1 outside a macro rejected");
+    chk_reject(S_bad_equ_dup,  "duplicate equate rejected");
+    chk_reject(S_bad_equ_undef, "undefined equate value rejected");
+    chk_reject(S_bad_equ_missing, "missing equ value rejected");
+    chk_reject(S_bad_equ_list, "equ comma list rejected (one value per line)");
     {
         flint_prog p; char err[256] = "";
         if (flint_assemble(S_bad_macro_body, &p, 4096, err, sizeof(err)) == 0) {

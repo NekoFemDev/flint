@@ -413,6 +413,20 @@ int flint_step(flint_vm *vm)
         if (!stk_push(vm, (flint_word)pc)) break;
         pc = (uint32_t)target; break;
 
+    /* indirect transfers: the target is a register value, not a stream
+     * field, so it is re-checked against code_size on every take — a
+     * register can hold any 64-bit word at any time. pc == code_size is
+     * refused too: there is no byte there to decode. */
+    case OP_JMPR:
+    case OP_CALLR:
+        if (!rd_u8(vm, &pc, &rd) || !chk_reg(vm, rd)) break;
+        t = vm->r[rd];
+        if (t < 0 || (uint64_t)t >= (uint64_t)vm->code_size) {
+            vm->err = FLINT_ERR_BADPC; break;
+        }
+        if (op == OP_CALLR && !stk_push(vm, (flint_word)pc)) break;
+        pc = (uint32_t)t; break;
+
     case OP_RET:
         stk_pop(vm, &t);
         if (vm->err) break;

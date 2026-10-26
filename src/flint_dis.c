@@ -9,7 +9,7 @@
  *   ADD..SHR rd,ra,rb(4) | ADDI..SHRI rd,ra,imm(11)
  *   NEG/NOT(3) | INC/DEC(2)
  *   JEQ..JHS rs,rt,tgt(11) | JxxI rs,imm,tgt(18)
- *   JMP/CALL tgt(9) | RET(1) | ENTER size(10) | LEAVE(1)
+ *   JMP/CALL tgt(9) | JMPR/CALLR rs(2) | RET(1) | ENTER size(10) | LEAVE(1)
  *   PUSH rs(2) | PUSHI imm(9) | POP rd(2)
  *   ALLOC rd,size(10) | FREE rs(2) | GC(1)
  *
@@ -63,14 +63,16 @@ static const char *const names[OP_COUNT] = {
     [OP_POP]     = "pop",
     [OP_ALLOC]   = "alloc",
     [OP_FREE]    = "free",
-    [OP_GC]      = "gc"
+    [OP_GC]      = "gc",
+    [OP_JMPR]    = "jump",
+    [OP_CALLR]   = "call"
 };
 
 static int op_len(flint_byte op)
 {
     switch (op) {
     case OP_INT: case OP_PUSH: case OP_POP: case OP_INC: case OP_DEC:
-    case OP_FREE:
+    case OP_FREE: case OP_JMPR: case OP_CALLR:
         return 2;
     case OP_COPY: case OP_NEG: case OP_NOT:
         return 3;
@@ -217,6 +219,9 @@ int flint_dis(const flint_byte *code, uint32_t n)
         case OP_JMP: case OP_CALL:
             rd_i64(code, &pc, &tgt, n);
             P("%s 0x%04X", names[op], (unsigned)tgt); break;
+        case OP_JMPR: case OP_CALLR:
+            ra = code[pc++];
+            P("%s r%d", names[op], ra); break;
         case OP_PUSH:
             ra = code[pc++]; P("%s r%d", names[op], ra); break;
         case OP_PUSHI:

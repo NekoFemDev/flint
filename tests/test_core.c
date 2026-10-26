@@ -50,6 +50,8 @@ static void e_enter(flint_word n)        { e8(OP_ENTER); e64(n); }
 static void e_leave(void)                { e8(OP_LEAVE); }
 static void e_loadx(int rd, int rb, int ri) { e8(OP_LOADX); e8(rd); e8(rb); e8(ri); }
 static void e_storx(int rb, int ri, int rs) { e8(OP_STOREX); e8(rb); e8(ri); e8(rs); }
+static void e_jmpr(int rs)       { e8(OP_JMPR); e8(rs); }
+static void e_callr(int rs)      { e8(OP_CALLR); e8(rs); }
 
 /* ---- host side: sys1 = putc into test buffer ---- */
 
@@ -335,6 +337,99 @@ static void t_unsigned(void)
           "unsigned pair: lo(-1,1) false, hs(-1,1) true");
 }
 
+/* v0.4.0: indirect jumps and calls — the target comes from a register */
+
+static void t_jmpr(void)
+{
+    flint_vm vm; uint32_t r_at, l_skip;
+    static flint_byte mem[512];
+
+    hasm_reset();
+    e_set(1, 0);                       /* r1 = target, patched below */
+    r_at = cn - 8;
+    e_set(0, 1);                       /* wrong-path marker */
+    e_jmpr(1);                         /* pc = r1 */
+    e_set(0, 99);                      /* must be skipped */
+    l_skip = cn;
+    e_set(0, 42);
+    e_hlt();
+    patch(r_at, l_skip);
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_OK && vm.r[0] == 42,
+          "jmpr: pc = rs, wrong path skipped");
+}
+
+static void t_callr(void)
+{
+    flint_vm vm; uint32_t r_at, fn;
+    static flint_byte mem[512];
+
+    hasm_reset();
+    e_set(1, 0);                       /* r1 = callee address, patched below */
+    r_at = cn - 8;
+    e_callr(1);                        /* push return pc; pc = r1 */
+    e_hlt();                           /* the return lands here */
+    fn = cn;
+    e_set(0, 7);
+    e_ret();
+    patch(r_at, fn);
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_OK && vm.r[0] == 7,
+          "callr: pushes the return pc, ret comes back");
+}
+
+static void t_jmpr_badpc(void)
+{
+    flint_vm vm; uint32_t r_at;
+    static flint_byte mem[512];
+
+    hasm_reset();
+    e_set(1, -1);                      /* never a valid pc */
+    e_jmpr(1);
+    e_hlt();
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_ERR_BADPC, "jmpr: negative target traps BADPC");
+
+    /* target == code_size: refused at the transfer itself, not on the
+     * (unreachable) fetch that would follow */
+    hasm_reset();
+    e_set(1, 0);
+    r_at = cn - 8;
+    e_jmpr(1);
+    e_hlt();
+    patch(r_at, (flint_word)cn);
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_step(&vm);                   /* set */
+    CHECK(flint_step(&vm) == FLINT_ERR_BADPC,
+          "jmpr: target == code_size traps at the transfer");
+}
+
+static void t_jmpr_badreg(void)
+{
+    flint_vm vm;
+    static flint_byte mem[512];
+
+    hasm_reset();
+    e8(OP_JMPR); e8(16);               /* r0..r15 are legal; 16 is not */
+    e_hlt();
+
+    memset(mem, 0, sizeof(mem));
+    flint_init(&vm, cb, cn, mem, sizeof(mem));
+    flint_run(&vm, 0);
+    CHECK(vm.err == FLINT_ERR_BADREG, "jmpr: register 16 traps");
+}
+
 int main(void)
 {
     printf("flint core %s\n", FLINT_VERSION);
@@ -351,6 +446,10 @@ int main(void)
     t_indexed();
     t_enter_overflow();
     t_unsigned();
+    t_jmpr();
+    t_callr();
+    t_jmpr_badpc();
+    t_jmpr_badreg();
     printf("fails: %d\n", fails);
     return fails ? 1 : 0;
 }

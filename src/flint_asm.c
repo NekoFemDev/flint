@@ -15,10 +15,13 @@
  *              add sub mul div mod and or xor shl shr inc dec neg not
  *              jump[.eq .ne .lt .ge .lo .hs] call return enter leave
  *              push pop alloc free gc sys exit
+ *              jump rN / call rN  (indirect: target taken from a register)
  *   registers  r0..r15
  *   mem        [rN]  [rN+num]  [rN-num]  [rN+rM]  [fp±num]  [fp+rM]
  *              (store: address first)
  *   data       str "bytes", chars, nums | int num | bytes num
+ *   equates    name equ value  (absolute 64-bit immediate, emits no bytes;
+ *              substituted before labels, may alias an earlier equate)
  *   sections   code: / data:  (code is the default)
  *   labels     name:  |  .local:   (locals attach to last global)
  *   includes   include "file"  |  .include "file"   (same directive)
@@ -116,6 +119,9 @@ enum { F_ANY = 0, F_CODE };
 
 typedef struct { char name[T_MAX]; flint_word addr; int kind; } symbol;
 
+/* name equ value — a compile-time immediate alias (absolute 64-bit word) */
+typedef struct { char name[T_MAX]; flint_word value; } equate;
+
 /* ---- lexer ---- */
 
 enum { T_IDENT, T_NUM, T_STR, T_CHR, T_PUNCT, T_EOL, T_EOF, T_MARG };
@@ -189,6 +195,7 @@ typedef struct {
 
     bbuf     code, mem;
     symbol  *syms; uint32_t ns, cs;
+    equate  *eqs;  uint32_t neq, ceq;
     fixup   *fix;  uint32_t nf, cf;
 
     char     last_global[T_MAX];
@@ -771,6 +778,37 @@ static int sym_find(asmx *a, const char *name)
     return -1;
 }
 
+/* equates: name -> absolute 64-bit immediate, from `name equ value`.
+ * A separate table from labels; parse_imm() consults it first, so an
+ * equate shadows a label of the same name in immediate position. */
+
+static int eq_find(asmx *a, const char *name)
+{
+    uint32_t i;
+    for (i = 0; i < a->neq; i++)
+        if (strcmp(a->eqs[i].name, name) == 0) return (int)i;
+    return -1;
+}
+
+static int eq_add(asmx *a, const token *name, flint_word value)
+{
+    if (eq_find(a, name->s) >= 0) {
+        fail_tok(a, name, "duplicate equate \"%s\"", name->s);
+        return 0;
+    }
+    if (a->neq + 1 > a->ceq) {
+        uint32_t nc = a->ceq ? a->ceq * 2 : 32;
+        equate *ne = (equate *)realloc(a->eqs, nc * sizeof(equate));
+        if (!ne) { fail(a, "out of memory"); return 0; }
+        a->eqs = ne; a->ceq = nc;
+    }
+    memset(a->eqs + a->neq, 0, sizeof(equate));
+    snprintf(a->eqs[a->neq].name, T_MAX, "%s", name->s);
+    a->eqs[a->neq].value = value;
+    a->neq++;
+    return 1;
+}
+
 static void full_local(asmx *a, const char *l, char *out, unsigned n)
 {
     /* compose "global.local" (or pass l through); the explicit bounded
@@ -889,7 +927,12 @@ static int parse_imm(asmx *a, opr *o, token *t)
     }
     if (t->type == T_IDENT && reg_no(t) < 0) {
         char full[T_MAX];
+        int eq;
         nx(a, t);
+        /* equates first: an equate is an absolute word known now, while
+         * a label is an address resolved in the fixup pass */
+        eq = eq_find(a, t->s);
+        if (eq >= 0) { o->kind = O_NUM; o->num = a->eqs[eq].value; return 1; }
         full_local(a, t->s, full, sizeof(full));
         o->kind = O_SYM;
         snprintf(o->name, sizeof(o->name), "%s", full);
@@ -1171,15 +1214,19 @@ static void m_incdec(asmx *a, int op)
     e_cst(a, op); e_regb(a, rd);
 }
 
+/* jump label -> OP_JMP (absolute)  |  jump rs -> OP_JMPR (indirect) */
 static void m_jump(asmx *a)
 {
     token t;
     pk(a, &t);
-    if (t.type == T_IDENT) {
+    if (reg_no(&t) >= 0) {
+        int rs; if (!parse_reg(a, &rs, &t)) return;
+        e_cst(a, OP_JMPR); e_regb(a, rs);
+    } else if (t.type == T_IDENT) {
         opr o; if (!parse_imm(a, &o, &t)) return;
         e_cst(a, OP_JMP); e_field(a, &o, F_CODE);
     } else {
-        fail(a, "expected label after jump");
+        fail(a, "expected label or register after jump");
     }
 }
 
@@ -1226,15 +1273,19 @@ static void m_branch(asmx *a, int bop, int bopi)
     e_field(a, &tgt, F_CODE);
 }
 
+/* call label -> OP_CALL (absolute)  |  call rs -> OP_CALLR (indirect) */
 static void m_call(asmx *a)
 {
     token t;
     pk(a, &t);
-    if (t.type == T_IDENT) {
+    if (reg_no(&t) >= 0) {
+        int rs; if (!parse_reg(a, &rs, &t)) return;
+        e_cst(a, OP_CALLR); e_regb(a, rs);
+    } else if (t.type == T_IDENT) {
         opr o; if (!parse_imm(a, &o, &t)) return;
         e_cst(a, OP_CALL); e_field(a, &o, F_CODE);
     } else {
-        fail(a, "expected label after call");
+        fail(a, "expected label or register after call");
     }
 }
 
@@ -1400,6 +1451,49 @@ static void asm_define_label(asmx *a, const token *tname)
     if (sym_add(a, full, pos, a->section) < 0) return;
     if (tname->s[0] != '.')
         snprintf(a->last_global, sizeof(a->last_global), "%s", tname->s);
+}
+
+/* name equ value — bind a name to an absolute 64-bit immediate. The
+ * scanner has the name consumed and 'equ' peeked; this consumes the
+ * rest of the line and emits no bytes. The value is a number, a char
+ * literal, -value, or an earlier equate (one value per line). */
+static int do_equ(asmx *a, const token *name)
+{
+    token t;
+    int neg = 0;
+    flint_word v;
+
+    pk(a, &t);                       /* 'equ' */
+    nx(a, &t);                       /* consume it */
+
+    pk(a, &t);
+    if (t.type == T_PUNCT && t.s[0] == '-') {
+        neg = 1;
+        nx(a, &t);
+        pk(a, &t);
+    }
+    if (t.type == T_NUM || t.type == T_CHR) {
+        nx(a, &t);
+        v = neg ? -t.num : t.num;
+    } else if (t.type == T_IDENT && reg_no(&t) < 0) {
+        int eq;
+        nx(a, &t);
+        eq = eq_find(a, t.s);
+        if (eq < 0) { fail_tok(a, &t, "undefined equate \"%s\"", t.s); return 0; }
+        v = neg ? -a->eqs[eq].value : a->eqs[eq].value;
+    } else {
+        fail_tok(a, &t, "expected a constant after equ");
+        return 0;
+    }
+
+    pk(a, &t);
+    if (t.type != T_EOL && t.type != T_EOF) {
+        fail_tok(a, &t, "unexpected text after equ value");
+        return 0;
+    }
+    nx(a, &t);                       /* eat the line end (if any) */
+
+    return eq_add(a, name, v);
 }
 
 /* ---- include ---- */
@@ -1590,6 +1684,13 @@ static int asm_scan(asmx *a)
             if (strcmp(t.s, "code") == 0) { a->section = S_CODE; continue; }
             if (strcmp(t.s, "data") == 0) { a->section = S_DATA; continue; }
             asm_define_label(a, &t);
+            continue;
+        }
+
+        /* name equ value — equate definition; the `name equ` shape is
+         * reserved, so the line never reaches the mnemonic dispatch */
+        if (t2.type == T_IDENT && strcmp(t2.s, "equ") == 0) {
+            if (!do_equ(a, &t)) break;
             continue;
         }
 
@@ -1871,7 +1972,7 @@ static void flint_prog_free_tmp(asmx *a)
     free(a->macs);
     while (a->msp > 0) free(a->mf[--a->msp].toks);
     free(a->code.b); free(a->mem.b);
-    free(a->syms); free(a->fix);
+    free(a->syms); free(a->eqs); free(a->fix);
 }
 
 int flint_assemble_ctx(const char *src, const char *src_name,

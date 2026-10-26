@@ -294,6 +294,27 @@ A jump to a data label is rejected at assembly ("is not a code label").
 Assembly is single-pass over the source plus a fixup pass, so forward
 references and cross-references work freely.
 
+### Constants: `equ`
+
+`name equ value` binds an identifier to an absolute 64-bit immediate.
+The line emits no bytecode; every use of the name in immediate position
+(`set`, the arithmetic short form, `push`, `enter`, branch compares, …)
+is replaced by the value while assembling:
+
+```
+BUFSZ  equ 64
+LIMIT  equ 3
+NEG    equ -5
+ALIAS  equ BUFSZ        // the value may name an earlier equate
+CHAR   equ 'A'          // char literals work
+```
+
+`equ` is resolved before labels, so an equate shadows a same-named label
+in immediate position. The value is a number, a character literal,
+`-value`, or an earlier equate — forward references are not resolved
+(assembly is single-pass). One value per line; re-defining a name is an
+error.
+
 ### Sections and data
 
 The default section is `code:`. Data objects live in `data:`.
@@ -515,13 +536,20 @@ Unconditional jump and procedures:
 | Form           | Bytes | Semantics                                       |
 |----------------|-------|-------------------------------------------------|
 | `jump label`   | 9     | pc = label (unconditional)                      |
+| `jump rs`      | 2     | pc = rs (indirect — target in a register)       |
 | `call label`   | 9     | push return pc; pc = label                      |
+| `call rs`      | 2     | push return pc; pc = rs (indirect)              |
 | `return`       | 1     | pop the return pc                               |
 | `enter imm`    | 10    | push fp; fp = sp; sp −= imm (reserve locals)    |
 | `leave`        | 1     | sp = fp; pop fp                                 |
 | `push rs`      | 2     | sp −= 8; mem[sp] = rs                           |
 | `push imm`     | 9     | immediate onto the stack                        |
 | `pop rd`       | 2     | rd = mem[sp]; sp += 8                           |
+
+An indirect target is re-checked against the code size on every transfer:
+`jump rs` / `call rs` trap `FLINT_ERR_BADPC` when the register does not
+hold an offset in `[0, code_size)`. Switch tables are the canonical use —
+compute the case address into a register, then `jump rs`.
 
 Recursion — `call`/`return` share the same stack as `push`/`pop`:
 the factorial example (one pushed register + a one-word return frame

@@ -50,6 +50,8 @@
  *   OP_JNE/JNEI, OP_JLT/JLTI, OP_JGE/JGEI — same shapes
  *   OP_JMP     target:i64
  *   OP_CALL    target:i64
+ *   OP_JMPR    rs:u8             (indirect: pc = rs)
+ *   OP_CALLR   rs:u8             (indirect: push return pc; pc = rs)
  *   OP_RET     -
  *   OP_ENTER   size:i64          (push fp; fp = sp; sp -= size)
  *   OP_LEAVE   -                 (sp = fp; pop fp)
@@ -60,6 +62,10 @@
  *                                 auto: rd = managed block payload, zeroed)
  *   OP_FREE    rs:u8             (operand validated; no-op — see below)
  *   OP_GC      -                 (auto: collect now; manual: no-op)
+ *
+ * New opcodes are appended before OP_COUNT and existing ones never move:
+ * an opcode value is baked into every .fbc image, so renumbering would
+ * invalidate them.
  *
  * RAM control: the memory model (Flint.toml `memory`, flint_mem_mode)
  * selects the allocator (v0.3.0):
@@ -152,6 +158,7 @@ enum {
     OP_JMP, OP_CALL, OP_RET, OP_ENTER, OP_LEAVE,
     OP_PUSH, OP_PUSHI, OP_POP,
     OP_ALLOC, OP_FREE, OP_GC,
+    OP_JMPR, OP_CALLR,   /* indirect jump/call: target comes from a register */
     OP_COUNT
 };
 
