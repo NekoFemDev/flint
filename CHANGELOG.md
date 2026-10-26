@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.4.0-pre.9 — 2026-10-26
+
+### Added
+
+- **Indirect jumps and calls**: `jump rs` / `call rs` take the target
+  from a register (`OP_JMPR` / `OP_CALLR`, one register byte each — 2
+  bytes per instruction). The VM re-checks the register against the code
+  size on every transfer, trapping `FLINT_ERR_BADPC` outside
+  `[0, code_size)` (including `pc == code_size`); `call rs` pushes the
+  return pc first, so `return` comes back through the shared stack.
+  Switch tables are the canonical use. The disassembler decodes both as
+  `jump rN` / `call rN`.
+- **`equ` constants** (`src/flint_asm.c`): `name equ value` binds an
+  identifier to an absolute 64-bit immediate and emits no bytes.
+  `parse_imm()` substitutes the value at every immediate site (`set`, the
+  arithmetic short form, `push`, `enter`, branch compares) before falling
+  back to label resolution, so an equate shadows a same-named label in
+  immediate position. Values are numbers, char literals, `-value`, or an
+  earlier equate; one value per line; re-defining a name is an error.
+  `asmx` keeps them in a growable table alongside the symbol and macro
+  tables.
+- **Tests**: `test_core` hand-encodes `jmpr`/`callr` (dispatch, call +
+  return, and the negative / `code_size` / register-16 traps);
+  `test_asm` covers both indirect forms, `equ` in arithmetic and branch
+  compares, negative/char-literal/alias values and the rejection paths.
+
+### Changed
+
+- The new opcodes are appended after `OP_GC`, so existing opcode values —
+  and `.fbc` images from earlier pre-releases — keep loading unchanged.
+- Disassembler output stays assembler-surface: the register forms print
+  as `jump rN` / `call rN` and reassemble as-is.
+- README: a "Constants: `equ`" section and `jump rs` / `call rs` rows in
+  the procedures table.
+
 ## 0.4.0-pre.8 — 2026-10-26
 
 ### Added
