@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0-beta.2 — 2026-10-29
+
+### Added
+
+- **TCP syscalls in the CLI host** (`src/flint_cli.c`, slots 21..25):
+  slot 21 `socket` (AF_INET/SOCK_STREAM -> fd), slot 22 `connect`
+  (r0 = fd, r1 = NUL-terminated dotted-quad address in `mem`, r2 =
+  port 1..65535 -> 0/−1), slot 23 `send` (r0 = fd, r1 = buffer in
+  `mem`, r2 = bytes -> bytes sent), slot 24 `recv` (r0 = fd, r1 =
+  buffer, r2 = max bytes -> bytes received, 0 = peer closed), slot 25
+  `close_socket` (r0 = fd -> 0/−1). No DNS: addresses go through
+  `inet_pton`. Every buffer span is validated inside the image, fds
+  are range-checked like the file layer, ports outside 1..65535 are
+  rejected, and `send` uses `MSG_NOSIGNAL` where available so a dead
+  peer cannot SIGPIPE the host.
+- **Test**: `tests/net.flt` — socket creation, argument/bounds
+  rejection paths (bad address string, out-of-range port, out-of-image
+  buffer) and close, all offline-safe; wired into `make test`.
+
+### Changed
+
+- README syscall table documents slots 7..25; slots 26..63 stay free
+  for embedding hosts.
+
 ## 0.4.0-beta.1 — 2026-10-26
 
 ### Added
