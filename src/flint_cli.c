@@ -106,14 +106,18 @@ static void std_regs(flint_vm *vm)
 
 /* ---- file layer: POSIX descriptors, args in r0..r2 ---- */
 
-/* NUL-terminated byte string at mem[addr]; returns length or -1 (runs off) */
+/* NUL-terminated byte string at mem[addr]; returns length or -1 (runs off).
+ * The address is validated against the whole image (the data section starts
+ * at 0, the stack ends at mem_size), so an out-of-range pointer can never
+ * turn into an out-of-bounds read. */
 static long clif_strn(const flint_vm *vm, flint_word addr)
 {
     flint_word i;
-    if (addr < 0) return -1;            /* never index before the image */
+    if (addr < 0 || addr >= (flint_word)vm->mem_size)
+        return -1;                      /* never index outside the image */
     for (i = addr; i < (flint_word)vm->mem_size; i++)
         if (vm->mem[i] == 0) return i - addr;
-    return -1;
+    return -1;                          /* no terminator before mem_size */
 }
 
 /* buffer span [addr, addr+cnt) inside vm->mem? 1 ok / 0 bad */
@@ -390,10 +394,43 @@ static void std_connect(flint_vm *vm)
     flint_word fd   = vm->r[0];
     flint_word port = vm->r[2];
     struct sockaddr_in sa;
+    const char *dbg = getenv("FLINT_DEBUG_CONNECT");
+    int         trace = dbg && dbg[0] && dbg[0] != '0';
+    long        slen;
+
+    slen = clif_strn(vm, vm->r[1]);
+
+    /* FLINT_DEBUG_CONNECT=1: trace the guest-supplied address string.  A
+     * bad pointer (outside the image) and an in-image-but-unterminated
+     * string both make clif_strn() fail, so dump the address and the first
+     * 32 bytes to tell them apart. */
+    if (trace) {
+        flint_word a = vm->r[1];
+        flint_word i, n = 0;
+
+        fprintf(stderr, "flint: connect: r1=%lld (0x%llx) mem_size=%u",
+                (long long)a, (unsigned long long)a, vm->mem_size);
+        if (a < 0 || a >= (flint_word)vm->mem_size) {
+            fprintf(stderr, " <outside mem>");
+        } else {
+            n = (flint_word)vm->mem_size - a;
+            if (n > 32) n = 32;
+            fprintf(stderr, " bytes:");
+            for (i = 0; i < n; i++)
+                fprintf(stderr, " %02x", (unsigned)vm->mem[a + i]);
+        }
+        fprintf(stderr, "\n");
+        if (slen < 0)
+            fprintf(stderr, "flint: connect: no NUL terminator from r1 "
+                            "within mem_size\n");
+        else
+            fprintf(stderr, "flint: connect: string len=%ld \"%.*s\"\n",
+                    slen, (int)slen, (const char *)(vm->mem + vm->r[1]));
+    }
 
     if (fd < 0 || fd > INT_MAX ||
         port < 1 || port > 0xFFFF ||
-        clif_strn(vm, vm->r[1]) < 0) {   /* address inside the image */
+        slen < 0) {                     /* address inside the image */
         vm->r[0] = -1;
         return;
     }
