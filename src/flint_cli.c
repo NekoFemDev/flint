@@ -23,6 +23,9 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include "flint.h"
 #include "flint_cli.h"
 #include "flint_img.h"
@@ -364,6 +367,98 @@ static void std_closedir(flint_vm *vm)
     vm->r[0] = 0;
 }
 
+/* ---- networking: TCP sockets (sys 21..25) ----
+ * The guest works with raw POSIX descriptors, like the file layer. The
+ * CLI host does no name resolution: connect() takes a dotted-quad
+ * literal (inet_pton), so a flint program can never stall on DNS.
+ * Buffer arguments are validated as spans inside the image before the
+ * POSIX call, and fds are range-checked like read/write. */
+
+/* SYS 21 (CLI_SYS_SOCKET): create an AF_INET/SOCK_STREAM (TCP) socket.
+ * result: r0 = fd or -1. */
+static void std_socket(flint_vm *vm)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    vm->r[0] = (fd < 0) ? (flint_word)-1 : (flint_word)fd;
+}
+
+/* SYS 22 (CLI_SYS_CONNECT): r0 = socket fd, r1 = NUL-terminated
+ * dotted-quad address in mem, r2 = port (1..65535). Blocks until the
+ * handshake resolves. result: r0 = 0 or -1. */
+static void std_connect(flint_vm *vm)
+{
+    flint_word fd   = vm->r[0];
+    flint_word port = vm->r[2];
+    struct sockaddr_in sa;
+
+    if (fd < 0 || fd > INT_MAX ||
+        port < 1 || port > 0xFFFF ||
+        clif_strn(vm, vm->r[1]) < 0) {   /* address inside the image */
+        vm->r[0] = -1;
+        return;
+    }
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, (const char *)(vm->mem + vm->r[1]),
+                  &sa.sin_addr) != 1) {
+        vm->r[0] = -1;                   /* not a dotted quad */
+        return;
+    }
+    vm->r[0] = (connect((int)fd, (const struct sockaddr *)&sa,
+                        (socklen_t)sizeof sa) == 0) ? 0 : -1;
+}
+
+/* SYS 23 (CLI_SYS_SEND): r0 = socket fd, r1 = buffer in mem, r2 = bytes.
+ * result: r0 = bytes sent or -1. */
+static void std_send(flint_vm *vm)
+{
+    flint_word fd  = vm->r[0];
+    flint_word off = vm->r[1];
+    flint_word cnt = vm->r[2];
+    int flags = 0;
+    ssize_t n;
+
+    if (fd < 0 || fd > INT_MAX || !clif_span(vm, off, cnt)) {
+        vm->r[0] = -1;
+        return;
+    }
+#ifdef MSG_NOSIGNAL
+    flags = MSG_NOSIGNAL;   /* a dead peer returns -1, never SIGPIPEs us */
+#endif
+    do {
+        n = send((int)fd, vm->mem + off, (size_t)cnt, flags);
+    } while (n < 0 && errno == EINTR);
+    vm->r[0] = (n < 0) ? (flint_word)-1 : (flint_word)n;
+}
+
+/* SYS 24 (CLI_SYS_RECV): r0 = socket fd, r1 = buffer in mem, r2 = max
+ * bytes. Blocks for at least one byte. result: r0 = bytes received
+ * (0 = peer closed the connection) or -1. */
+static void std_recv(flint_vm *vm)
+{
+    flint_word fd  = vm->r[0];
+    flint_word off = vm->r[1];
+    flint_word cnt = vm->r[2];
+    ssize_t n;
+
+    if (fd < 0 || fd > INT_MAX || !clif_span(vm, off, cnt)) {
+        vm->r[0] = -1;
+        return;
+    }
+    do {
+        n = recv((int)fd, vm->mem + off, (size_t)cnt, 0);
+    } while (n < 0 && errno == EINTR);
+    vm->r[0] = (n < 0) ? (flint_word)-1 : (flint_word)n;
+}
+
+/* SYS 25 (CLI_SYS_CLOSE_SOCKET): r0 = socket fd -> 0 or -1. Same as
+ * SYS 6 close; net code gets to stay in one slot block. */
+static void std_close_socket(flint_vm *vm)
+{
+    std_close(vm);
+}
+
 /* SYS 10 (CLI_SYS_TIME): time -> r0 = UNIX epoch seconds */
 static void std_time(flint_vm *vm)
 {
@@ -372,28 +467,33 @@ static void std_time(flint_vm *vm)
 
 void flint_cli_sysoff(flint_vm *vm)
 {
-    /* ABI slots 0..6 (flint.h); CLI extensions 7..20 (see flint_cli.h) */
-    flint_sys_set(vm, FLINT_SYS_PRINT_STR, std_print_str);
-    flint_sys_set(vm, FLINT_SYS_PUTC,      std_putc);
-    flint_sys_set(vm, FLINT_SYS_GETC,      std_getc);
-    flint_sys_set(vm, FLINT_SYS_OPEN,      std_open);
-    flint_sys_set(vm, FLINT_SYS_READ,      std_read);
-    flint_sys_set(vm, FLINT_SYS_WRITE,     std_write);
-    flint_sys_set(vm, FLINT_SYS_CLOSE,     std_close);
-    flint_sys_set(vm, CLI_SYS_STAT,        std_stat);
-    flint_sys_set(vm, CLI_SYS_MKDIR,       std_mkdir);
-    flint_sys_set(vm, CLI_SYS_UNLINK,      std_unlink);
-    flint_sys_set(vm, CLI_SYS_TIME,        std_time);
-    flint_sys_set(vm, CLI_SYS_REGS,        std_regs);
-    flint_sys_set(vm, CLI_SYS_ARGC,        std_argc);
-    flint_sys_set(vm, CLI_SYS_GETARG,      std_getarg);
-    flint_sys_set(vm, CLI_SYS_GETENV,      std_getenv);
-    flint_sys_set(vm, CLI_SYS_LSEEK,       std_lseek);
-    flint_sys_set(vm, CLI_SYS_RENAME,      std_rename);
-    flint_sys_set(vm, CLI_SYS_RMDIR,       std_rmdir);
-    flint_sys_set(vm, CLI_SYS_OPENDIR,     std_opendir);
-    flint_sys_set(vm, CLI_SYS_READDIR,     std_readdir);
-    flint_sys_set(vm, CLI_SYS_CLOSEDIR,    std_closedir);
+    /* ABI slots 0..6 (flint.h); CLI extensions 7..25 (see flint_cli.h) */
+    flint_sys_set(vm, FLINT_SYS_PRINT_STR,  std_print_str);
+    flint_sys_set(vm, FLINT_SYS_PUTC,       std_putc);
+    flint_sys_set(vm, FLINT_SYS_GETC,       std_getc);
+    flint_sys_set(vm, FLINT_SYS_OPEN,       std_open);
+    flint_sys_set(vm, FLINT_SYS_READ,       std_read);
+    flint_sys_set(vm, FLINT_SYS_WRITE,      std_write);
+    flint_sys_set(vm, FLINT_SYS_CLOSE,      std_close);
+    flint_sys_set(vm, CLI_SYS_STAT,         std_stat);
+    flint_sys_set(vm, CLI_SYS_MKDIR,        std_mkdir);
+    flint_sys_set(vm, CLI_SYS_UNLINK,       std_unlink);
+    flint_sys_set(vm, CLI_SYS_TIME,         std_time);
+    flint_sys_set(vm, CLI_SYS_REGS,         std_regs);
+    flint_sys_set(vm, CLI_SYS_ARGC,         std_argc);
+    flint_sys_set(vm, CLI_SYS_GETARG,       std_getarg);
+    flint_sys_set(vm, CLI_SYS_GETENV,       std_getenv);
+    flint_sys_set(vm, CLI_SYS_LSEEK,        std_lseek);
+    flint_sys_set(vm, CLI_SYS_RENAME,       std_rename);
+    flint_sys_set(vm, CLI_SYS_RMDIR,        std_rmdir);
+    flint_sys_set(vm, CLI_SYS_OPENDIR,      std_opendir);
+    flint_sys_set(vm, CLI_SYS_READDIR,      std_readdir);
+    flint_sys_set(vm, CLI_SYS_CLOSEDIR,     std_closedir);
+    flint_sys_set(vm, CLI_SYS_SOCKET,       std_socket);
+    flint_sys_set(vm, CLI_SYS_CONNECT,      std_connect);
+    flint_sys_set(vm, CLI_SYS_SEND,         std_send);
+    flint_sys_set(vm, CLI_SYS_RECV,         std_recv);
+    flint_sys_set(vm, CLI_SYS_CLOSE_SOCKET, std_close_socket);
 }
 
 /* ---------------- file helpers ---------------- */

@@ -11,7 +11,7 @@ vm core:       ~56 opcodes, word = int64, 16 registers, flat memory
 embed core:    include/flint.h + src/flint_core.c + src/flint_gc.c
                (zero libc; flint_gc.c is the auto-mode mark-sweep collector)
                + src/flint_asm.c                    (only if asm→bytecode is needed)
-executable:    + src/flint_cli.c + src/main.c       (CLI host: stdio + POSIX file syscalls)
+executable:    + src/flint_cli.c + src/main.c       (CLI host: stdio + POSIX file/network syscalls)
                + src/flint_img.c                    (host-side: .fbc image container)
 shared lib:    + src/stub_so.c + include/flint_so.h (dlopen host: flint build --so)
 ```
@@ -742,13 +742,18 @@ image bounds. File results are POSIX descriptors; failures return −1.
 | 18   | opendir   | r0 = NUL-terminated path in `mem` | r0 = handle ≥ 0 or −1 |
 | 19   | readdir   | r0 = handle, r1 = buffer in `mem`, r2 = capacity | r0 = name length (`.`, `..` included), 0 = end of directory, −1 = error |
 | 20   | closedir  | r0 = handle   | r0 = 0 or −1                   |
+| 21   | socket    | — (AF_INET, SOCK_STREAM) | r0 = fd or −1        |
+| 22   | connect   | r0 = fd, r1 = NUL-terminated dotted-quad address in `mem`, r2 = port (1..65535) | r0 = 0 or −1 |
+| 23   | send      | r0 = fd, r1 = buffer in `mem`, r2 = bytes | r0 = bytes sent or −1 |
+| 24   | recv      | r0 = fd, r1 = buffer in `mem`, r2 = max bytes | r0 = bytes received (0 = peer closed) or −1 |
+| 25   | close_socket | r0 = fd    | r0 = 0 or −1                   |
 
 `open` flags: `0` = read-only; `1` = write, creating/truncating; `2` =
 append, creating the file when missing. Slots 0..6 are the standard set
-(`FLINT_SYS_*` in `flint.h`); 7..20 are the CLI extensions (7..9 file
-metadata, 10..11 time/debug, 12..14 args/env, 15..20 files/dirs). Slots
-21..63 stay free for embedding hosts. Calling an unfilled slot is a
-predictable `NOSYS` trap.
+(`FLINT_SYS_*` in `flint.h`); 7..25 are the CLI extensions (7..9 file
+metadata, 10..11 time/debug, 12..14 args/env, 15..20 files/dirs,
+21..25 network). Slots 26..63 stay free for embedding hosts. Calling an
+unfilled slot is a predictable `NOSYS` trap.
 
 Common recipes:
 
@@ -762,6 +767,7 @@ sys 7/8/9       // file metadata: stat(path, buf) / mkdir(path, mode) / unlink(p
 sys 12/13/14    // argc / getarg(index, buf, cap) / getenv(name, buf, cap)
 sys 15/16/17    // lseek(fd, off, whence) / rename(old, new) / rmdir(path)
 sys 18/19/20    // opendir(path) / readdir(handle, buf, cap) / closedir(handle)
+sys 21/22/23/24/25 // TCP: socket() / connect(fd, ip, port) / send(fd, buf, n) / recv(fd, buf, n) / close_socket(fd)
 ```
 
 ---

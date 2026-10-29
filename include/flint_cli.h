@@ -28,9 +28,16 @@
  *   19 readdir    r0 = handle, r1 = buf, r2 = cap -> name length,
  *                 0 = end of directory, -1 = bad handle/error
  *   20 closedir   r0 = handle -> 0 or -1
- * Slots 0..6 are the generic standard set (flint.h FLINT_SYS_*); 7..20
+ *   21 socket     AF_INET/SOCK_STREAM (TCP) -> fd or -1
+ *   22 connect    r0 = fd, r1 = dotted-quad addr in mem, r2 = port
+ *                 (1..65535) -> 0 or -1
+ *   23 send       r0 = fd, r1 = buf, r2 = len -> bytes sent or -1
+ *   24 recv       r0 = fd, r1 = buf, r2 = max -> bytes (0 = peer
+ *                 closed the connection) or -1
+ *   25 close_socket  r0 = fd -> 0 or -1
+ * Slots 0..6 are the generic standard set (flint.h FLINT_SYS_*); 7..25
  * are the CLI extensions (7..9 file-meta, 10..11 time/debug, 12..14
- * args/env, 15..20 files/dirs). */
+ * args/env, 15..20 files/dirs, 21..25 network). */
 enum {
     CLI_SYS_STAT   = 7,
     CLI_SYS_MKDIR  = 8,
@@ -43,9 +50,14 @@ enum {
     CLI_SYS_LSEEK  = 15,
     CLI_SYS_RENAME = 16,
     CLI_SYS_RMDIR  = 17,
-    CLI_SYS_OPENDIR  = 18,
-    CLI_SYS_READDIR  = 19,
-    CLI_SYS_CLOSEDIR = 20
+    CLI_SYS_OPENDIR      = 18,
+    CLI_SYS_READDIR      = 19,
+    CLI_SYS_CLOSEDIR     = 20,
+    CLI_SYS_SOCKET       = 21,
+    CLI_SYS_CONNECT      = 22,
+    CLI_SYS_SEND         = 23,
+    CLI_SYS_RECV         = 24,
+    CLI_SYS_CLOSE_SOCKET = 25
 };
 
 void flint_cli_sysoff(flint_vm *vm);

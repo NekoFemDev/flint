@@ -1,0 +1,74 @@
+// net — the CLI network syscalls (21..25):
+//   sys 21 socket           sys 23 send
+//   sys 22 connect          sys 24 recv
+//   sys 25 close_socket
+// Offline-safe: the connect attempts below die in argument/address
+// parsing before any traffic, and out-of-image send/recv spans are
+// rejected before the socket is touched. A live round-trip needs a
+// listening peer and is exercised by hand.
+//
+// Run from the project root: flint run tests/net.flt -> "net: ok"
+
+include "stdlib.flt"
+
+data:
+good_ip: str "1.1.1.1", 0
+bad_ip:  str "not.an.ip", 0
+l_pass:  str "net: ok", 10, 0
+l_fail:  str "net: FAIL", 10, 0
+
+code:
+main:
+    // sys 21: one TCP socket
+    sys 21
+    copy r4, r0
+    jump.lt r4, 0, .fail
+
+    // sys 22: bad address string -> -1, no syscall made
+    copy r0, r4
+    set r1, bad_ip
+    set r2, 80
+    sys 22
+    jump.ne r0, -1, .fail
+
+    // sys 22: port outside 1..65535 -> -1
+    copy r0, r4
+    set r1, good_ip
+    set r2, 0
+    sys 22
+    jump.ne r0, -1, .fail
+    copy r0, r4
+    set r1, good_ip
+    set r2, 65536
+    sys 22
+    jump.ne r0, -1, .fail
+
+    // sys 23/24: buffer span outside the image -> -1, socket untouched
+    copy r0, r4
+    set r1, 2147483647
+    set r2, 8
+    sys 23
+    jump.ne r0, -1, .fail
+    copy r0, r4
+    set r1, 2147483647
+    set r2, 8
+    sys 24
+    jump.ne r0, -1, .fail
+
+    // sys 25: close the socket -> 0; a negative fd -> -1
+    copy r0, r4
+    sys 25
+    jump.ne r0, 0, .fail
+    set r0, -1
+    sys 25
+    jump.ne r0, -1, .fail
+
+    set r1, l_pass
+    call s_print
+    set r0, 0
+    exit
+.fail:
+    set r1, l_fail
+    call s_print
+    set r0, 1
+    exit
