@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0-beta.4 — 2026-10-30
+
+### Fixed
+
+- **`clif_strn()` bounds check** (`src/flint_cli.c`): the address is
+  rejected up front when it is outside `[0, mem_size)` instead of relying
+  on the scan loop to fall through. A pointer equal to `mem_size` and any
+  negative/oversized word now fail before a byte is read. The helper is
+  shared by every NUL-terminated-string syscall: `open` (3), `stat` (7),
+  `mkdir` (8), `unlink` (9), `getenv` (14), `rename` (16), `rmdir` (17),
+  `opendir` (18) and `connect` (22).
+
+### Added
+
+- **`FLINT_DEBUG_CONNECT=1`**: `connect()` traces the guest-supplied
+  address to stderr before `inet_pton` — the address value, `mem_size`,
+  the first 32 bytes at that address, and the resolved string (length and
+  bytes) or a "no NUL terminator" report. This tells an out-of-image
+  pointer apart from an in-image string that is simply not terminated.
+  Off by default; normal runs and `make test` stay quiet.
+
 ## 0.4.0-beta.3 — 2026-10-30
 
 ### Changed
