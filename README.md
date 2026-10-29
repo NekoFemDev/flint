@@ -13,7 +13,8 @@ embed core:    include/flint.h + src/flint_core.c + src/flint_gc.c
                + src/flint_asm.c                    (only if asm→bytecode is needed)
 executable:    + src/flint_cli.c + src/main.c       (CLI host: stdio + POSIX file/network syscalls)
                + src/flint_img.c                    (host-side: .fbc image container)
-shared lib:    + src/stub_so.c + include/flint_so.h (dlopen host: flint build --so)
+shared lib:    + src/stub.c built -DBUILD_AS_LIBRARY + include/flint_so.h
+               (dlopen/JNI host: flint build --so)
 ```
 
 ---
@@ -236,7 +237,10 @@ The dynamic loader maps the stub's segments and ignores the appended
 payload — the same self-extracting trick as `--elf`, with `dladdr` (and
 a `/proc/self/maps` fallback) instead of `/proc/self/exe`. The trailer is
 checksummed, so a truncated or post-processed file fails to load with
-`flint_so_error()` set rather than crashing. Exported labels come from
+`flint_so_error()` set rather than crashing. The fused library also
+carries a JNI entry point, `Java_com_flint_Native_run` (the native half
+of `com.flint.Native.run()`), so an Android/Java host can run the payload
+through the JNI bridge instead of `dlopen()`. Exported labels come from
 the `export` directive (see the syntax section) — global code labels
 only:
 

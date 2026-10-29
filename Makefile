@@ -48,15 +48,16 @@ $(STUB): src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cl
 
 # `flint build --so` fuses this shared library with the program's images
 # and exported symbols into target/lib<name>.so — see include/flint_so.h.
-# Same source set as the ELF stub, built PIC; a shared library always
+# The same source as the ELF stub, built -DBUILD_AS_LIBRARY (the
+# constructor + flint_so API replace main()); a shared library always
 # links the system libc dynamically, so no STUB_LDFLAGS here.
-$(SO): src/stub_so.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
+$(SO): src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
        src/flint_img.c src/flint_dis.c \
        include/flint.h include/flint_cli.h include/flint_img.h include/flint_so.h \
-       include/flint_ui.h
+       include/flint_stub.h include/flint_ui.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -fPIC -shared -pthread -o $@ \
-	  src/stub_so.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
+	$(CC) $(CFLAGS) -DBUILD_AS_LIBRARY -fPIC -shared -pthread -o $@ \
+	  src/stub.c src/flint_core.c src/flint_gc.c src/flint_asm.c src/flint_cli.c \
 	  src/flint_img.c src/flint_dis.c
 
 build/test_core: tests/test_core.c src/flint_core.c include/flint.h

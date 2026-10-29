@@ -69,6 +69,18 @@ int main(int argc, char **argv)
     }
     check(run() == 0, "flint_so_run resets the argument vector");
 
+    /* JNI: the same fused library carries the export a JVM binds by name;
+     * env/thiz are unused by the function, so a plain dlsym call
+     * exercises it without a Java runtime */
+    {
+        int (*jrun)(void *, void *) =
+            (int (*)(void *, void *))dlsym(h, "Java_com_flint_Native_run");
+        check(jrun != 0, "JNI export Java_com_flint_Native_run resolves");
+        if (jrun)
+            check(jrun(0, 0) == 0,
+                  "Java_com_flint_Native_run -> main exits 0");
+    }
+
     check(find("s_sum3") >= 0 && find("s_triple") >= 0,
           "flint_so_find resolves exported labels");
     check(find("nope") == -1, "flint_so_find -> -1 for unknown names");
