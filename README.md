@@ -1,4 +1,4 @@
-# FLINT 0.4.0-beta.2
+# FLINT 0.4.0-beta.3
 
 A minimal assembly-style language + execution machine in **pure C99**.
 Target use: an embeddable scripting backend and a standalone CLI host.

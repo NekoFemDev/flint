@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.0-beta.3 — 2026-10-30
+
+### Changed
+
+- **Both fused hosts are one source** (`src/stub.c`): the `--elf` host
+  and the `--so` host merged under `-DBUILD_AS_LIBRARY`; the Makefile
+  builds `build/stub.elf` (default) and `build/stub.so` (the define,
+  PIC, shared) from it. The open/decode/validate/load sequence is shared
+  in `load_embedded_payload()`, which reads the host file's tail and
+  dispatches on the trailer magic: FLSO (fused library — version, sizes,
+  symbol records, FNV-1a checksum) or FLNT (images-only fusion).
+  `src/stub_so.c` is removed.
+- Makefile / README: the `--so` target builds the merged file; the
+  source map and the shared-library section document the JNI entry.
+
+### Added
+
+- **JNI entry point**: `build/stub.so` exports
+  `Java_com_flint_Native_run` (the native half of `com.flint.Native.run()`)
+  — runs `main` on a fresh VM and returns the CLI convention
+  (`r0 & 0x7FFFFFFF`, or −`FLINT_ERR_*` on a trap / failed load). A real
+  `jni.h` is preferred when the toolchain has one; otherwise fallback
+  declarations keep the export ABI-correct without a JDK (the release
+  runner has no JNI headers on its include path).
+- **Plain-FLNT fusion**: a fused library built as
+  `[stub.so][code][mem][FlintPayload]` also loads — `main` and the JNI
+  entry run; the exported-label API (`flint_so_call` / `flint_so_find`)
+  needs the FLSO symbol table and reports `FLINT_SO_ENOENT` without it.
+- `tests/test_so.c`: the JNI export is dlsym'ed and called on the fused
+  library (no JVM needed — the function ignores `env`/`thiz`).
+
 ## 0.4.0-beta.2 — 2026-10-29
 
 ### Added
