@@ -32,7 +32,7 @@
  *   22 connect    r0 = fd, r1 = dotted-quad addr in mem, r2 = port
  *                 (1..65535) -> 0 or -1
  *   23 send       r0 = fd, r1 = buf, r2 = len -> bytes sent or -1
- *   24 recv       r0 = fd, r1 = buf, r2 = max -> bytes (0 = peer
+ *   24 recv       r0 = fd, r1 = buf, r2 = max (>= 1) -> bytes (0 = peer
  *                 closed the connection) or -1
  *   25 close_socket  r0 = fd -> 0 or -1
  * Slots 0..6 are the generic standard set (flint.h FLINT_SYS_*); 7..25

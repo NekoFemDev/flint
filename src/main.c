@@ -254,11 +254,17 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "repl") == 0)
         return flint_repl();
 
-    /* convenience: `flint path/file.flt` == `flint run path/file.flt` */
-    if (has_flint_ext_public(cmd))
+    /* convenience: `flint path/file.flt [args...]` ==
+     * `flint run path/file.flt [args...]` — the trailing words reach the
+     * program through sys 12..14, same as the explicit verb. */
+    if (has_flint_ext_public(cmd)) {
+        flint_cli_set_args(argc - 2, argv + 2);
         return flint_cli_run_file(cmd, 65536, 0, FLINT_MEM_MANUAL);
-    if (has_fbc_ext_public(cmd))
+    }
+    if (has_fbc_ext_public(cmd)) {
+        flint_cli_set_args(argc - 2, argv + 2);
         return flint_cli_run_image(cmd);
+    }
 
     usage(stderr);
     return 2;

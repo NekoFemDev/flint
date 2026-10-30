@@ -124,6 +124,7 @@ test: $(TESTS) $(BIN) $(STUB) $(SO) build/test_so
 	  && ./$(BIN) tests/fsops.flt       | grep -q "fs: ok" \
 	  && ./$(BIN) tests/net.flt         | grep -q "net: ok" \
 	  && ./$(BIN) run tests/args.flt alpha beta | grep -q "args: ok" \
+	  && ./$(BIN) tests/args.flt alpha beta | grep -q "args: ok" \
 	  && ./$(BIN) tests/heap.flt  | grep -q "heap ok"       \
 	  && ./$(BIN) tests/heap.flt  | grep -q "mode: manual"  \
 	  && ./$(BIN) tests/mem.flt   | grep -q "flint"

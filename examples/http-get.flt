@@ -1,0 +1,193 @@
+// http-get.flt — a real TCP client on the CLI socket syscalls.
+//
+// Usage:
+//   flint run examples/http-get.flt [host] [port] [path]
+//   flint build --elf examples/http-get.flt && target/http-get [host] [port] [path]
+//
+// Defaults: 127.0.0.1 8080 /
+// No DNS: host is a dotted-quad literal (the CLI host feeds it to
+// inet_pton), so run a local server first:
+//
+//   python3 -m http.server 8080
+//   flint run examples/http-get.flt 127.0.0.1 8080 /index.html
+//
+// Or point it at a public HTTP/1.x endpoint:
+//   flint run examples/http-get.flt 1.1.1.1 80 /
+//
+// Syscalls: 21 socket, 22 connect, 23 send, 24 recv, 25 close_socket.
+// send() is allowed to accept fewer bytes than asked for, so the request
+// goes through a send-until-done loop; recv() returns 0 when the peer
+// closes (HTTP/1.0 + Connection: close), which ends the response loop.
+
+include "stdlib.flt"
+include "string.flt"
+
+data:
+default_host: str "127.0.0.1", 0
+default_path: str "/", 0
+get_prefix:   str "GET ", 0
+http_suffix:  str " HTTP/1.0\r\n", 0
+host_prefix:  str "Host: ", 0
+conn_close:   str "Connection: close\r\n", 0
+crlf:         str "\r\n", 0
+
+host_buf: bytes 64              // dotted quad, NUL-terminated
+path_buf: bytes 128
+port_buf: bytes 16              // argv port text for s_atoi
+request:  bytes 320             // request line + Host/Connection + blank line
+rx:       bytes 4096
+
+msg_args: str "usage: http-get [host] [port] [path]  (default 127.0.0.1 8080 /)", 10, 0
+msg_sock: str "socket() failed", 10, 0
+msg_conn: str "connect() failed", 10, 0
+msg_send: str "send() failed", 10, 0
+msg_recv: str "recv() failed", 10, 0
+
+code:
+main:
+    set r10, -1                 // socket fd
+    set r11, 8080               // port
+
+    // host_buf = default_host; path_buf = default_path
+    set r1, host_buf
+    set r2, default_host
+    call s_strcpy
+    set r1, path_buf
+    set r2, default_path
+    call s_strcpy
+
+    sys 12                      // argc -> r0
+    copy r8, r0                 // r8 = argc; s_* helpers clamp at r4..r7
+    jump.eq r8, .args_done
+
+    // argv[1] -> host_buf (reject a truncated argument)
+    set r0, 0
+    set r1, host_buf
+    set r2, 64
+    sys 13
+    jump.lt r0, 0, .fail_args
+    jump.ge r0, 64, .fail_args
+    jump.eq r8, 1, .args_done
+
+    // argv[2] -> port
+    set r0, 1
+    set r1, port_buf
+    set r2, 16
+    sys 13
+    jump.lt r0, 0, .fail_args
+    jump.ge r0, 16, .fail_args
+    set r1, port_buf
+    call s_atoi
+    copy r11, r0
+    jump.lt r11, 1, .fail_args
+    jump.ge r11, 65536, .fail_args
+    jump.eq r8, 2, .args_done
+
+    // argv[3] -> path_buf
+    set r0, 2
+    set r1, path_buf
+    set r2, 128
+    sys 13
+    jump.lt r0, 0, .fail_args
+    jump.ge r0, 128, .fail_args
+
+.args_done:
+    // request = "GET " + path + " HTTP/1.0\r\n" +
+    //           "Host: " + host + "\r\n" +
+    //           "Connection: close\r\n" + "\r\n"
+    set r1, request
+    set r2, get_prefix
+    call s_strcpy
+    set r1, request
+    set r2, path_buf
+    call s_strcat
+    set r1, request
+    set r2, http_suffix
+    call s_strcat
+    set r1, request
+    set r2, host_prefix
+    call s_strcat
+    set r1, request
+    set r2, host_buf
+    call s_strcat
+    set r1, request
+    set r2, crlf
+    call s_strcat
+    set r1, request
+    set r2, conn_close
+    call s_strcat
+    set r1, request
+    set r2, crlf
+    call s_strcat
+
+    sys 21                      // socket(AF_INET, SOCK_STREAM)
+    copy r10, r0
+    jump.lt r10, 0, .fail_sock
+
+    copy r0, r10
+    set r1, host_buf
+    copy r2, r11
+    sys 22                      // connect(fd, host, port)
+    jump.ne r0, 0, .fail_conn
+
+    set r1, request
+    call s_strlen               // r0 = request length
+    copy r6, r0                 // remaining
+    set r5, request             // cursor
+.send_loop:
+    jump.eq r6, .send_done
+    copy r0, r10
+    copy r1, r5
+    copy r2, r6
+    sys 23                      // send(fd, cursor, remaining)
+    jump.lt r0, 0, .fail_send
+    jump.eq r0, .fail_send      // no forward progress: don't spin
+    add r5, r5, r0
+    sub r6, r6, r0
+    jump .send_loop
+
+.send_done:
+.recv_loop:
+    copy r0, r10
+    set r1, rx
+    set r2, 4096
+    sys 24                      // recv(fd, rx, 4096)
+    jump.lt r0, 0, .fail_recv
+    jump.eq r0, .done           // 0 = peer closed the connection
+    set r1, rx
+    copy r2, r0
+    sys 0                       // print exactly the bytes received
+    jump .recv_loop
+
+.done:
+    copy r0, r10
+    sys 25                      // close_socket(fd)
+    set r0, 0
+    exit
+
+.fail_args:
+    set r1, msg_args
+    call s_print
+    jump .fail
+.fail_sock:
+    set r1, msg_sock
+    call s_print
+    jump .fail
+.fail_conn:
+    set r1, msg_conn
+    call s_print
+    jump .fail
+.fail_send:
+    set r1, msg_send
+    call s_print
+    jump .fail
+.fail_recv:
+    set r1, msg_recv
+    call s_print
+.fail:
+    jump.lt r10, 0, .fail_exit
+    copy r0, r10
+    sys 25
+.fail_exit:
+    set r0, 1
+    exit

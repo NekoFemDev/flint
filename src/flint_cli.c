@@ -383,6 +383,15 @@ static void std_closedir(flint_vm *vm)
 static void std_socket(flint_vm *vm)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
+
+#ifdef SO_NOSIGPIPE
+    /* BSD/macOS: send() has no MSG_NOSIGNAL; make a dead peer return
+     * EPIPE instead of raising SIGPIPE (which would kill the host). */
+    if (fd >= 0) {
+        int one = 1;
+        (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    }
+#endif
     vm->r[0] = (fd < 0) ? (flint_word)-1 : (flint_word)fd;
 }
 
@@ -470,8 +479,10 @@ static void std_send(flint_vm *vm)
 }
 
 /* SYS 24 (CLI_SYS_RECV): r0 = socket fd, r1 = buffer in mem, r2 = max
- * bytes. Blocks for at least one byte. result: r0 = bytes received
- * (0 = peer closed the connection) or -1. */
+ * bytes (at least 1). Blocks for at least one byte. result: r0 = bytes
+ * received (0 = peer closed the connection) or -1. A zero-length recv is
+ * rejected: POSIX returns 0 for it, which would be indistinguishable
+ * from the peer-close sentinel. */
 static void std_recv(flint_vm *vm)
 {
     flint_word fd  = vm->r[0];
@@ -479,7 +490,7 @@ static void std_recv(flint_vm *vm)
     flint_word cnt = vm->r[2];
     ssize_t n;
 
-    if (fd < 0 || fd > INT_MAX || !clif_span(vm, off, cnt)) {
+    if (fd < 0 || fd > INT_MAX || cnt < 1 || !clif_span(vm, off, cnt)) {
         vm->r[0] = -1;
         return;
     }

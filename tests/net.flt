@@ -5,7 +5,7 @@
 // Offline-safe: the connect attempts below die in argument/address
 // parsing before any traffic, and out-of-image send/recv spans are
 // rejected before the socket is touched. A live round-trip needs a
-// listening peer and is exercised by hand.
+// listening peer and is exercised by examples/http-get.flt.
 //
 // Run from the project root: flint run tests/net.flt -> "net: ok"
 
@@ -52,6 +52,14 @@ main:
     copy r0, r4
     set r1, 2147483647
     set r2, 8
+    sys 24
+    jump.ne r0, -1, .fail
+
+    // sys 24: zero max bytes -> -1; POSIX would return 0, which is the
+    // peer-close sentinel and would look like an orderly shutdown.
+    copy r0, r4
+    set r1, 0
+    set r2, 0
     sys 24
     jump.ne r0, -1, .fail
 

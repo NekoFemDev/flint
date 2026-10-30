@@ -749,7 +749,7 @@ image bounds. File results are POSIX descriptors; failures return −1.
 | 21   | socket    | — (AF_INET, SOCK_STREAM) | r0 = fd or −1        |
 | 22   | connect   | r0 = fd, r1 = NUL-terminated dotted-quad address in `mem`, r2 = port (1..65535) | r0 = 0 or −1 |
 | 23   | send      | r0 = fd, r1 = buffer in `mem`, r2 = bytes | r0 = bytes sent or −1 |
-| 24   | recv      | r0 = fd, r1 = buffer in `mem`, r2 = max bytes | r0 = bytes received (0 = peer closed) or −1 |
+| 24   | recv      | r0 = fd, r1 = buffer in `mem`, r2 = max bytes (≥ 1) | r0 = bytes received (0 = peer closed) or −1 |
 | 25   | close_socket | r0 = fd    | r0 = 0 or −1                   |
 
 `open` flags: `0` = read-only; `1` = write, creating/truncating; `2` =
@@ -932,6 +932,18 @@ examples/flint-brainfuck/ Brainfuck interpreter across four `lib/` modules
                          demo for `flint build`'s dependency tree:
                          `flint run examples/flint-brainfuck < prog.bf`
                          (try `examples/flint-brainfuck/examples/hello.bf`).
+```
+
+Network demo (single file):
+
+```
+examples/http-get.flt     TCP HTTP/1.0 client on sys 21..25 (socket / connect /
+                          send / recv / close_socket), with argv host / port /
+                          path (defaults 127.0.0.1 8080 /) and a send-until-
+                          done loop. No DNS: hosts are dotted quads.
+                          python3 -m http.server 8080, then
+                          flint run examples/http-get.flt 127.0.0.1 8080 /
+                          (or try flint run examples/http-get.flt 1.1.1.1 80 /).
 ```
 
 Run the demos: `printf 'foobar' | flint run examples/b64-demo` → `Zm9vYmFy`;
