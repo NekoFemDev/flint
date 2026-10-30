@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.0-beta.5 — 2026-10-30
+
+### Fixed
+
+- **`recv` rejects a zero-length buffer** (`src/flint_cli.c`, slot 24):
+  POSIX returns 0 for `recv(fd, buf, 0, 0)`, but the syscall ABI
+  documents 0 as "peer closed the connection". A guest passing `r2 = 0`
+  saw a phantom EOF. `r2 < 1` now returns −1 before the POSIX call; the
+  header/README contract and `tests/net.flt` cover the case.
+- **`send` cannot SIGPIPE the host on BSD/macOS**: the host used
+  `MSG_NOSIGNAL` where available (Linux/Android). On systems without it,
+  a send to a dead peer could raise SIGPIPE and kill the process.
+  `socket` now sets `SO_NOSIGPIPE` under `#ifdef`; Linux/Android is
+  unchanged.
+- **Convenience runs pass program arguments** (`src/main.c`):
+  `flint file.flt alpha beta` used to drop `alpha beta` because the
+  shorthand bypassed `flint_cli_set_args`. The `.flt` and `.fbc`
+  shorthands now register the argv tail exactly like `flint run`;
+  `make test` exercises both forms.
+
+### Added
+
+- **`examples/http-get.flt`**: a TCP HTTP/1.0 client built on syscalls
+  21..25 — argv host/port/path, a send-until-done loop, a recv loop
+  until the peer closes, and clean error/close paths. Works from source,
+  `.fbc` images and fused `--elf` binaries; see the README examples.
+
+### Changed
+
+- `recv` (slot 24) now requires `r2 >= 1`; 0 is reserved for the
+  peer-close sentinel. Header and README docs updated.
+
 ## 0.4.0-beta.4 — 2026-10-30
 
 ### Fixed
